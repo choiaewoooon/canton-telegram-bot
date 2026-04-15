@@ -1,8 +1,0 @@
-{
-  "nav": { "dashboard": "대시보드", "analytics": "분석", "feed": "소식" },
-  "hero": { "high": "24시간 최고", "low": "24시간 최저", "volume": "24시간 거래량", "marketCap": "시가총액" },
-  "kpi": { "bmRatio": "B/M Ratio", "activeAddr": "활성 주소 (24h)", "dailyBurn": "일일 소각", "privateTx": "기관 TX 비율", "institutional": "기관 업데이트" },
-  "feed": { "title": "캔톤 소식", "viewAll": "모든 소식 보기" },
-  "governance": { "title": "거버넌스 현황", "active": "진행 중", "viewOriginal": "원문 보기", "viewVote": "투표 현황" },
-  "network": { "title": "네트워크 상태" }
-}

@@ -1,8 +1,0 @@
-{
-  "nav": { "dashboard": "Dashboard", "analytics": "Analytics", "feed": "Feed" },
-  "hero": { "high": "24h High", "low": "24h Low", "volume": "24h Volume", "marketCap": "Market Cap" },
-  "kpi": { "bmRatio": "B/M Ratio", "activeAddr": "Active Addresses (24h)", "dailyBurn": "Daily Burn", "privateTx": "Private TX (Institutional)", "institutional": "institutional updates" },
-  "feed": { "title": "Canton News", "viewAll": "View all updates" },
-  "governance": { "title": "Governance at a Glance", "active": "Active", "viewOriginal": "View Original", "viewVote": "Vote Status" },
-  "network": { "title": "Network Status" }
-}
