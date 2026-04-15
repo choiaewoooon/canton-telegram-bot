@@ -11,3 +11,7 @@ test_card_up.png
 launchd_stdout.log
 launchd_stderr.log
 docs/superpowers/
+
+# Generated artifacts
+*.bak
+.superpowers/
