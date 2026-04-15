@@ -1,12 +1,21 @@
-# Canton Telegram Bot - Dependencies
+# Canton Telegram Bot — dependencies
+# Runs locally on a Mac via LaunchAgent. No FastAPI/uvicorn needed.
+# The web dashboard (Canton Hub) lives in the sibling canton-hub/ repo.
+
+# Telegram SDK
 python-telegram-bot>=21.0
+
+# HTTP + scraping
 httpx>=0.25
 beautifulsoup4>=4.12
-python-dotenv>=1.0
-APScheduler>=3.10
 playwright>=1.40
+
+# Scheduling (used only in scheduler mode — launchd cron works too)
+APScheduler>=3.10
+
+# Daily card image generation
 Jinja2>=3.1
 matplotlib>=3.8
-fastapi>=0.115
-uvicorn[standard]>=0.30
-sse-starlette>=2.0
+
+# Config
+python-dotenv>=1.0

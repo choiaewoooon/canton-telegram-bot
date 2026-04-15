@@ -1,157 +1,136 @@
 # Canton Telegram Bot
 
-매일 아침 9시(KST)에 Canton Network 일일 리포트를 텔레그램 채널에 자동 포스팅하는 봇입니다.
+매일 아침 9시(KST)에 Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인.
 
-## 수집 데이터
+홈 Mac의 `launchd` LaunchAgent에서 구동한다. 클라우드 호스팅 X.
 
-| 소스 | 데이터 |
-|------|--------|
-| Twitter/X | @CantonNetwork, @CantonFdn 최근 24시간 트윗 |
-| CantonScan | Daily Burn/Mint Ratio, 일일 소각량, 네트워크 지표 |
-| CoinGecko | $CC 가격, 24h 변동률, 거래량, 시가총액 |
+## Tech Stack
 
-## 빠른 시작
+| 카테고리 | 기술 | 용도 |
+|---|---|---|
+| 런타임 | Python 3.11+ | 메인 |
+| 텔레그램 | python-telegram-bot 21+ | 채널 전송 |
+| HTTP | httpx 0.25+ | 외부 API 비동기 호출 |
+| HTML 파싱 | beautifulsoup4 4.12+ | CantonScan HTML |
+| 동적 스크래핑 | Playwright 1.40+ | CantonScan SPA 폴백 |
+| 스케줄 | APScheduler 3.10+ (선택) · launchd (실제) | 9시 KST 발사 |
+| 이미지 | Jinja2 3.1 + matplotlib 3.8+ | 일일 카드 PNG 생성 |
+| 설정 | python-dotenv 1.0+ | `.env` 로드 |
 
-### 1. 사전 준비
+## Getting Started
 
-- **Python 3.11+** 필요
-- **텔레그램 봇 토큰**: [@BotFather](https://t.me/BotFather)에서 봇 생성 후 토큰 발급
-- **텔레그램 채널**: 봇을 채널 관리자로 추가 (메시지 발송 권한 필요)
-- **RapidAPI 키**: [Twitter API45](https://rapidapi.com/DataFanatic/api/twitter-api45)에서 발급 (트윗 수집에 필요)
+### Prerequisites
 
-### 2. 설치
+- Python 3.11+
+- Telegram Bot Token (BotFather)
+- Telegram Channel ID (봇을 채널에 admin으로 추가)
+- RapidAPI Twitter API45 구독
+- (선택) CoinGecko Demo API Key
+
+### Installation
 
 ```bash
-cd canton-telegram-bot
-
-# 가상환경 생성 (권장)
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 의존성 설치
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-
-# Playwright 브라우저 설치 (CantonScan 스크래핑용)
 playwright install chromium
 ```
 
-### 3. 환경변수 설정
+### Configuration
+
+`.env.example`을 `.env`로 복사 후 값 채우기:
 
 ```bash
 cp .env.example .env
+# 편집: TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, RAPIDAPI_KEY, COINGECKO_API_KEY (선택)
 ```
 
-`.env` 파일을 편집하여 다음 값을 입력합니다:
-
-```env
-# 필수
-TELEGRAM_BOT_TOKEN=7123456789:AAH...     # BotFather에서 발급
-TELEGRAM_CHANNEL_ID=@my_canton_channel    # 채널 username 또는 chat_id
-RAPIDAPI_KEY=your_rapidapi_key            # RapidAPI Twitter API45 키
-
-# 선택
-COINGECKO_API_KEY=                        # 레이트 리밋 완화용
-```
-
-### 4. 텔레그램 봇 설정
-
-1. 텔레그램에서 [@BotFather](https://t.me/BotFather)에게 `/newbot` 명령
-2. 봇 이름과 username 설정
-3. 발급받은 토큰을 `.env`의 `TELEGRAM_BOT_TOKEN`에 입력
-4. 공지 채널에서 봇을 **관리자**로 추가 (메시지 발송 권한)
-5. 채널 ID: `@채널username` 또는 비공개 채널은 `-100` + 숫자 ID
-
-### 5. 실행
+### Development / Manual Test
 
 ```bash
-# 테스트 (즉시 1회 실행)
+# 미리보기 모드 (텔레그램 전송 없음, stdout 에 HTML-stripped 텍스트 출력)
+TELEGRAM_BOT_TOKEN= python bot.py --now
+
+# 실제 전송 1회 (테스트 채널 권장)
 python bot.py --now
 
-# 스케줄러 모드 (매일 9시 자동 실행)
+# 스케줄러 모드 (매일 9시 자동) — launchd 대신 쓸 수도 있음
 python bot.py
 ```
 
-## 프로젝트 구조
+### Production (launchd on macOS)
+
+```bash
+# 1. 기존 LaunchAgent 언로드 (있으면)
+launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist 2>/dev/null
+
+# 2. plist를 올바른 경로로 수정해서 배치
+# ProgramArguments 의 python + bot.py 경로가 이 프로젝트로 가도록
+# WorkingDirectory 도 마찬가지
+
+# 3. 로드
+launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist
+
+# 4. 수동 테스트 발사
+launchctl kickstart gui/$(id -u)/com.cobling.canton-bot
+
+# 5. 로그 확인
+tail -f launchd_stdout.log launchd_stderr.log bot.log
+```
+
+## Environment Variables
+
+`.env.example` 참조:
+
+| 변수 | 설명 | 필수 |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API 토큰 (BotFather 발급) | O |
+| `TELEGRAM_CHANNEL_ID` | 대상 채널 ID (`@channelname` 또는 `-100...`) | O |
+| `RAPIDAPI_KEY` | Twitter API45 키 | O |
+| `COINGECKO_API_KEY` | Demo 키 (레이트 리밋 방지) | 권장 |
+| `SCHEDULE_HOUR` | 스케줄러 모드 발사 시(hour) | 기본 9 |
+| `SCHEDULE_MINUTE` | 스케줄러 모드 발사 분(minute) | 기본 0 |
+| `TIMEZONE` | 스케줄러 TZ | 기본 `Asia/Seoul` |
+
+## Project Structure
 
 ```
 canton-telegram-bot/
-├── bot.py                          # 메인 실행 파일 (스케줄러 + 엔트리포인트)
-├── config.py                       # 설정 (환경변수 로드)
-├── formatter.py                    # 텔레그램 메시지 포매터
+├── bot.py                     # 엔트리포인트 (--now | 스케줄러)
+├── formatter.py               # HTML 메시지 생성
+├── chart_generator.py         # matplotlib 차트 base64
+├── image_generator.py         # Jinja2 카드 → PNG
+├── tweet_summarizer.py        # 트윗 AI 요약
 ├── collectors/
-│   ├── __init__.py
-│   ├── twitter_collector.py        # Twitter/X 데이터 수집 (RapidAPI)
-│   ├── cantonscan_collector.py     # CantonScan 네트워크 지표 수집
-│   └── price_collector.py          # CoinGecko $CC 가격 수집
+│   ├── price_collector.py
+│   ├── cantonscan_collector.py
+│   └── twitter_collector.py
+├── templates/
+│   ├── daily_card.html        # Jinja 템플릿
+│   └── assets/                # 이미지/폰트
+├── config.py
 ├── requirements.txt
-├── .env.example
-└── README.md
+└── .env.example
 ```
 
-## 백그라운드 실행 (macOS launchd)
+## Key Features
 
-현재 `~/Library/LaunchAgents/com.cobling.canton-bot.plist`로 등록되어 있음.
+| 기능 | 설명 | 상태 |
+|---|---|---|
+| 9시 KST 자동 포스팅 | launchd로 매일 1회 실행 | 구현됨 |
+| 텔레그램 메시지 | `$CC 가격 + B/M Ratio + mint/burn + 트윗 AI 요약` HTML | 구현됨 |
+| 일일 카드 이미지 | Jinja2 HTML 템플릿 → matplotlib 차트 → PNG (send_photo caption) | 구현됨 |
+| 텍스트 폴백 | 이미지 생성 실패 시 텍스트만 전송 | 구현됨 |
+| 트윗 AI 요약 | `tweet_summarizer.py` | 구현됨 |
+| 미리보기 모드 | `TELEGRAM_BOT_TOKEN=` 비워서 stdout 덤프 | 구현됨 |
 
-### 상태 확인
+## Related Docs
 
-```bash
-launchctl list | grep cobling
-```
-
-- `PID 숫자 0 com.cobling.canton-bot` → 정상 실행 중
-- `- 1 com.cobling.canton-bot` → 꺼진 상태 (에러)
-
-### 시작
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-```
-
-### 중지
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-```
-
-### 재시작
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-```
-
-### 로그 확인
-
-```bash
-# 실시간 로그
-tail -f "/Users/choejaewon/project/Canton telebot(coblin)/launchd_stdout.log"
-
-# 에러 로그
-tail -f "/Users/choejaewon/project/Canton telebot(coblin)/launchd_stderr.log"
-
-# bot.py 자체 로그
-tail -f "/Users/choejaewon/project/Canton telebot(coblin)/bot.log"
-```
-
-### 완전 삭제
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-rm ~/Library/LaunchAgents/com.cobling.canton-bot.plist
-```
-
-### 참고
-
-- 맥 재부팅해도 자동 시작됨 (`RunAtLoad` + `KeepAlive`)
-- 크래시 시 자동 재시작됨
-- 스케줄 변경은 `.env`의 `SCHEDULE_HOUR` / `SCHEDULE_MINUTE` 수정 후 재시작
-
-## 트러블슈팅
-
-| 문제 | 해결 방법 |
-|------|-----------|
-| RapidAPI 인증 실패 | RAPIDAPI_KEY가 올바른지, Twitter API45 구독이 활성화되어 있는지 확인 |
-| CantonScan 데이터 없음 | 사이트 구조가 변경되었을 수 있음. `cantonscan_collector.py`의 파싱 로직 업데이트 필요 |
-| CoinGecko 429 에러 | Rate limit 초과. 무료 Demo API Key 등록 권장 |
-| 텔레그램 전송 실패 | 봇이 채널 관리자인지, 메시지 발송 권한이 있는지 확인 |
-| launchd 시작 안됨 | `launchd_stderr.log` 확인. venv 경로나 Python 버전 문제일 수 있음 |
+| 문서 | 설명 |
+|---|---|
+| [CLAUDE.md](./CLAUDE.md) | 에이전트 운영 매뉴얼 |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | 파이프라인 설계 |
+| [docs/DATA_GUIDE.md](./docs/DATA_GUIDE.md) | 외부 데이터 소스 |
+| [docs/DEVELOPMENT_GUIDE.md](./docs/DEVELOPMENT_GUIDE.md) | 코딩 표준 |
+| [docs/SYSTEM_OVERVIEW.md](./docs/SYSTEM_OVERVIEW.md) | 결정 기록 |
+| [../canton-hub/](../canton-hub/) | 관련 프로젝트: Canton 웹 대시보드 (별도 레포) |

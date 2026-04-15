@@ -1,271 +1,113 @@
-# System Overview - Canton Telegram Bot
+# SYSTEM_OVERVIEW.md
 
-> **Update Trigger**: 외부 서비스 추가/제거, 수집기 신규 구현, 배포 방식 변경 시 이 문서를 갱신할 것.
+> **업데이트 트리거**: 새 Phase 진입 / ADR 추가·변경 / Known Issue 해결·추가 / Lessons Learned 갱신 시 이 문서를 먼저 수정한다.
+> **읽는 순서**: Overview → Phase History → ADRs → Known Issues → Lessons Learned → Change Log
 
-## 1. 시스템 목적
+---
 
-| 항목 | 설명 |
+## 1. Project Overview
+
+Canton Telegram Bot은 Canton Network 데이터를 하루 1회 수집하여 HTML+이미지 기반 리포트를 Telegram 채널에 게시하는 Python 파이프라인이다. 2026-04-15 legacy `canton-bot/`에서 분리되어 독립 배포 단위가 되었으며, 웹 대시보드(`canton-hub/`)와는 독립된 `collectors/` 사본을 유지한다. 목적은 단순·결정론적 1일 1회 리포트 전달이며, 웹 API나 실시간 기능은 범위 밖이다.
+
+---
+
+## 2. Phase History
+
+| 날짜 | Phase | 내용 |
+|------|-------|------|
+| 2026-03-31 | P0 — Initial | Daily Canton report bot 최초 생성, 첫 버전 출시 |
+| 2026-04-XX | P1 — Image | Jinja2 HTML 템플릿 → PNG 이미지 생성 추가 (Telegram 리치 포스트) |
+| 2026-04-XX | P2 — Chart | matplotlib 기반 price chart 생성기 (base64) 추가 |
+| 2026-04-XX | P3 — Summarizer | Canton 트윗 AI 요약 (tweet summarizer) 추가 |
+| 2026-04-XX | P4 — Web expand | `canton-bot/` 리포에 FastAPI 백엔드 + Next.js 프론트엔드 확장 (웹 대시보드가 봇과 공존) |
+| 2026-04-XX | P5 — Incident | **9am KST CoinGecko 429 incident** — 웹 scheduler와 bot이 Home Mac IP를 공유, CoinGecko rate limit 동시 히트, 봇 실패 |
+| 2026-04-14 | P6 — RCA | Root cause 식별: 공유 `collectors/` 디렉토리 + 공유 rate limit |
+| 2026-04-15 | P7 — Split | **Folder split** — `canton-bot/`을 `canton-hub/` (web) + `canton-telegram-bot/` (this bot)로 분리, 각자 독립 `collectors/` 사본 보유 |
+| 2026-04-15 | P8 — Docs | docs-init 실행, AI Native 문서 체계 확립 |
+
+---
+
+## 3. Architecture Decision Records (ADRs)
+
+### ADR-001: One-shot launchd (not APScheduler keep-alive)
+
+| 항목 | 내용 |
 |------|------|
-| 프로젝트명 | Canton Telegram Bot |
-| 핵심 기능 | Canton Network 생태계 일일 리포트 자동 생성 및 텔레그램 채널 포스팅 |
-| 실행 주기 | 매일 09:00 KST (APScheduler cron) |
-| 대상 사용자 | Canton Network 커뮤니티 텔레그램 채널 구독자 |
-| 수집 데이터 | Twitter 트윗, CantonScan 네트워크 지표, CoinGecko $CC 가격 |
+| Status | Planned migration (현재 legacy KeepAlive 유지) |
+| Decision | `StartCalendarInterval` + one-shot process 선호, `KeepAlive=true` + APScheduler 지양 |
+| Reason | One-shot이 단순하고 추론이 쉬우며, bot.py crash 시 무한 재시작 없음 |
+| Impact | 마이그레이션 시 plist 업데이트 필요 |
+| Rule | 새로운 스케줄링 경로는 반드시 launchd cron 스타일로 작성 |
 
-### 비즈니스 컨텍스트
+### ADR-002: Collectors never raise
 
-Canton Network 생태계의 주요 지표(토큰 소각/발행, 트랜잭션, 가격 변동)와 공식 트위터 소식을 하나의 텔레그램 메시지로 집약하여, 커뮤니티 구성원이 매일 아침 한눈에 현황을 파악할 수 있도록 한다.
+| 항목 | 내용 |
+|------|------|
+| Status | Active |
+| Decision | 모든 collector는 자체 예외를 catch하고 empty dataclass 반환 |
+| Reason | 외부 API 1개의 실패가 daily report 전체를 중단시켜서는 안 됨 |
+| Rule | `collectors/` 하위에서 `raise` **금지**. 대신 `logger.warning(...)` + empty return |
+| 검증 | `grep -rn "raise " collectors/` → 0건이어야 함 |
 
-## 2. 기술 스택
+### ADR-003: Image generation has text fallback
 
-| 카테고리 | 기술 | 버전 | 용도 |
-|----------|------|------|------|
-| Runtime | Python | 3.11+ | 메인 실행 환경 |
-| Telegram SDK | python-telegram-bot | >=21.0 | 텔레그램 메시지 전송 |
-| Twitter 스크래핑 | twscrape | >=0.12 | @CantonNetwork, @CantonFdn 트윗 수집 |
-| HTTP 클라이언트 | httpx | >=0.25 | CoinGecko API, CantonScan HTTP 요청 |
-| HTML 파싱 | beautifulsoup4 | >=4.12 | CantonScan HTML 파싱 |
-| 브라우저 자동화 | playwright | >=1.40 | CantonScan SPA 렌더링 폴백 |
-| 스케줄러 | APScheduler | >=3.10 | cron 기반 일일 실행 |
-| 환경변수 | python-dotenv | >=1.0 | .env 파일 로드 |
+| 항목 | 내용 |
+|------|------|
+| Status | Active |
+| Decision | 이미지 카드 전송 시도 → 실패 시 text-only 메시지로 fallback |
+| Before | 이미지 실패 시 리포트 전체 abort |
+| After | `bot.py`의 이미지 경로를 try/except로 감싸고 `send_message`로 fallback |
+| Rule | 이미지는 nice-to-have, **텍스트가 계약(contract)** |
 
-## 3. 아키텍처
+### ADR-004: Independent collectors copy (folder split, 2026-04-15)
 
-### 프로세스 흐름
+| 항목 | 내용 |
+|------|------|
+| Status | Active |
+| Decision | `canton-hub/collectors/`와 별개로 자체 `collectors/` 디렉토리 복제 보유 |
+| Reason | 웹 scheduler와의 shared rate limit 제거, Home Mac ↔ Fly.io 독립 배포 가능, 한쪽 업데이트가 다른 쪽을 breaking하지 않음 |
+| Before | 공유 `canton-bot/collectors/`를 `bot.py`와 `api/scheduler.py`가 함께 사용 |
+| After | `canton-telegram-bot/collectors/` (this) + `canton-hub/collectors/` (web) 완전 독립 |
+| Trade-off | 코드 중복 수용 — 배포 독립성이 DRY보다 우선 |
+| Impact | 공통 버그 발견 시 수동 sync 또는 slight drift 수용 |
 
-```
-[APScheduler cron 09:00 KST]
-        |
-        v
-  collect_and_post()
-        |
-        +---> asyncio.gather (병렬 수집)
-        |       |
-        |       +---> TwitterCollector.collect_all()
-        |       |       - twscrape user_tweets API
-        |       |       - 실패 시 search API 폴백
-        |       |
-        |       +---> CantonScanCollector.collect()
-        |       |       - 1단계: API 엔드포인트 시도
-        |       |       - 2단계: HTML 직접 파싱
-        |       |       - 3단계: Playwright 렌더링
-        |       |
-        |       +---> PriceCollector.collect()
-        |               - 1순위: /coins/markets (상세)
-        |               - 2순위: /simple/price (폴백)
-        |
-        v
-  build_daily_report()   # HTML 포맷 메시지 생성
-        |
-        v
-  Bot.send_message()     # 텔레그램 채널 전송
-```
+### ADR-005: Only 3 collectors (not all 11)
 
-### 디렉토리 구조
+| 항목 | 내용 |
+|------|------|
+| Status | Active |
+| Decision | 본 봇은 `twitter`, `cantonscan`, `price` 3개만 사용. `governance`, `holders`, `kr_companies`, `dex_oi`, `realtime_prices` 등은 drop |
+| Reason | Daily report는 3개 지표만 필요, 나머지는 web dashboard 전용 |
+| Rule | `canton-hub`의 collectors/에서 **import 금지**. 신규 collector 필요 시 로컬로 복사 |
+| 검증 | `grep -rn "from canton_hub\|from canton-hub" .` → 0건 |
 
-```
-canton-telegram-bot/
-  bot.py                        # 메인 엔트리포인트 (스케줄러 + collect_and_post)
-  config.py                     # 환경변수 로드 및 상수 정의
-  formatter.py                  # 텔레그램 메시지 HTML 포매터
-  requirements.txt              # Python 의존성
-  .env.example                  # 환경변수 템플릿
-  collectors/
-    __init__.py                 # 수집기 모듈 export
-    twitter_collector.py        # Twitter/X 트윗 수집
-    cantonscan_collector.py     # CantonScan 네트워크 지표 수집
-    price_collector.py          # CoinGecko $CC 가격 수집
-  docs/
-    SYSTEM_OVERVIEW.md          # 이 문서
-```
+---
 
-### 런타임 특성
+## 4. Known Issues
 
-| 항목 | 값 |
-|------|-----|
-| 프로세스 모델 | 단일 프로세스, asyncio 이벤트 루프 |
-| 상태 관리 | Stateless (외부 DB 없음, 매 실행마다 독립적 수집) |
-| 실행 모드 | `python bot.py` (스케줄러) / `python bot.py --now` (즉시 1회) |
-| misfire_grace_time | 3600초 (스케줄 1시간 지연까지 허용) |
+| ID | 이슈 | 심각도 | 상태 | 조치 |
+|----|------|--------|------|------|
+| KI-001 | LaunchAgent가 legacy KeepAlive 모드 — ADR-001대로 `StartCalendarInterval` one-shot으로 마이그레이션 필요 | Medium | Open | plist 재작성 예정 |
+| KI-002 | 테스트 스위트 부재 — manual preview mode 검증만 가능 | Medium | Open | pytest 도입 TODO |
+| KI-003 | Tweet summarizer의 AI API 의존성 미문서화 (openai? anthropic? TBD) | Low | Open | `summarizer/` 확인 후 ARCHITECTURE.md 반영 |
+| KI-004 | `templates/daily_card.html`이 이전 문서에서 version-control되지 않음 (현재 ARCHITECTURE.md에만 기록) | Low | Resolved (2026-04-15) | ARCHITECTURE.md에 명시 완료 |
 
-## 4. 외부 서비스 의존성
+---
 
-| 서비스 | URL/엔드포인트 | 용도 | 인증 방식 | 실패 시 동작 |
-|--------|---------------|------|----------|-------------|
-| Telegram Bot API | Bot API (python-telegram-bot SDK) | 메시지 전송 | `TELEGRAM_BOT_TOKEN` | 전송 실패, 로그 에러 |
-| Twitter/X | twscrape 라이브러리 경유 | @CantonNetwork, @CantonFdn 트윗 | 계정/비밀번호 또는 쿠키 | 빈 트윗 목록(`{}`)으로 대체 |
-| CantonScan | `https://www.cantonscan.com/stats` | burn/mint/transactions 지표 | 없음 (공개 페이지) | 빈 CantonScanData로 대체 |
-| CoinGecko API | `https://api.coingecko.com/api/v3` | $CC 가격/시가총액/거래량 | API Key (선택, 레이트리밋 완화) | 빈 PriceData로 대체 |
+## 5. Lessons Learned
 
-### 수집 대상 트위터 계정
+| # | Lesson | 배경 | 규칙 |
+|---|--------|------|------|
+| L1 | 공유 IP + 공유 API quota = 재앙 예약 | 9am KST CoinGecko 429 incident | 항상 rate-limited 리소스는 배포 단위로 분리 (ADR-004) |
+| L2 | 텍스트는 **항상** 동작해야 함 — 리치 콘텐츠(이미지)는 optional | 이미지 실패로 리포트 전체 abort 사례 | ADR-003: fallback 필수 |
+| L3 | launchd KeepAlive + 내부 scheduler는 launchd cron + one-shot보다 디버깅이 훨씬 어려움 | 무한 재시작 루프, 로그 추적 난이도 | ADR-001: one-shot 선호 |
+| L4 | Collector 중복(`canton-hub` ↔ `canton-telegram-bot`)이 API consumer 리팩터보다 단순 | 배포 독립성이 DRY보다 중요한 scale | ADR-004: 중복 허용 |
+| L5 | 개발 시 항상 preview mode(`TELEGRAM_BOT_TOKEN=`) 사용 — 프로덕션 채널 스팸 금지 | 과거 테스트 메시지 프로덕션 유출 | DEVELOPMENT_GUIDE.md에 preview mode 강제 |
 
-```python
-TWITTER_ACCOUNTS = ["CantonNetwork", "CantonFdn"]
-```
+---
 
-### CoinGecko 엔드포인트
-
-| 우선순위 | 엔드포인트 | 데이터 |
-|----------|-----------|--------|
-| 1 | `/coins/markets?ids=canton&vs_currency=usd` | 가격, 24h 변동, 고가/저가, 시총, 거래량 |
-| 2 | `/simple/price?ids=canton&vs_currencies=usd` | 가격, 24h 변동 (폴백) |
-
-## 5. 운영 특성
-
-### 스케줄링
-
-| 설정 | 기본값 | 환경변수 |
-|------|--------|----------|
-| 실행 시각 | 09:00 | `SCHEDULE_HOUR`, `SCHEDULE_MINUTE` |
-| 타임존 | Asia/Seoul | `TIMEZONE` |
-| misfire 허용 | 1시간 | 코드 하드코딩 (3600초) |
-
-### 에러 처리 전략
-
-```
-WHEN 개별 수집기(Twitter/CantonScan/Price)가 예외 발생
-  -> DO 해당 수집기 결과를 빈 기본값으로 대체
-  -> DO 나머지 수집기 데이터로 리포트 생성 계속
-
-WHEN CantonScan API 엔드포인트 실패
-  -> DO HTML 직접 파싱 시도
-  -> WHEN HTML 파싱도 실패 -> DO Playwright 헤드리스 브라우저 폴백
-
-WHEN Twitter user_tweets API 실패
-  -> DO search API로 폴백
-
-WHEN CoinGecko /coins/markets 실패
-  -> DO /simple/price 폴백
-
-WHEN TELEGRAM_BOT_TOKEN 미설정
-  -> DO stdout에 미리보기 출력 (HTML 태그 제거)
-
-WHEN TELEGRAM_CHANNEL_ID 미설정
-  -> DO 전송 건너뛰기, 에러 로그
-```
-
-### 로깅
-
-| 출력 대상 | 형식 |
-|----------|------|
-| stdout | `%(asctime)s [%(levelname)s] %(name)s: %(message)s` |
-| bot.log 파일 | 동일 (UTF-8 인코딩) |
-
-로그 레벨: `INFO` (기본)
-
-주요 로그 포인트:
-- 리포트 시작/완료 마커: `=== 일일 리포트 시작/완료 ===`
-- 각 수집기 성공/실패
-- 메시지 길이 (chars)
-- 텔레그램 전송 결과
-
-## 6. 보안 고려사항
-
-### 인증 정보 관리
-
-| 시크릿 | 환경변수 | 필수 여부 |
-|--------|----------|----------|
-| Telegram Bot Token | `TELEGRAM_BOT_TOKEN` | 필수 (없으면 미리보기 모드) |
-| Telegram Channel ID | `TELEGRAM_CHANNEL_ID` | 필수 (없으면 전송 불가) |
-| Twitter 계정 | `TWITTER_USERNAME`, `TWITTER_PASSWORD` | 트윗 수집에 필수 |
-| Twitter 이메일 | `TWITTER_EMAIL`, `TWITTER_EMAIL_PASSWORD` | twscrape IMAP 인증용 |
-| Twitter 쿠키 | `TWITTER_COOKIES` | 선택 (계정/비번 대신 사용 가능) |
-| CoinGecko API Key | `COINGECKO_API_KEY` | 선택 (레이트리밋 완화) |
-
-### 보안 규칙
-
-```
-WHEN .env 파일 작성 -> DO .gitignore에 반드시 포함 확인
-WHEN Twitter 인증 -> DO 쿠키 기반 인증 우선 사용 (계정 잠금 리스크 감소)
-WHEN 로그 출력 -> DO 토큰/비밀번호 값 직접 출력 금지
-```
-
-### 주의사항
-
-- `.env.example`은 플레이스홀더만 포함, 실제 값 없음
-- twscrape는 Twitter 계정 풀을 로컬 SQLite DB(`accounts.db`)에 저장 -- 이 파일도 `.gitignore` 대상
-- Playwright는 Chromium 바이너리를 로컬에 설치하므로 배포 환경에서 `playwright install chromium` 필요
-
-## 7. 확장 가능성
-
-### 새 수집기 추가
-
-```
-WHEN 새 데이터 소스 추가 필요
-  -> DO collectors/ 디렉토리에 새 모듈 생성
-  -> DO dataclass 정의 (fetched: bool 필드 포함)
-  -> DO collectors/__init__.py에 export 추가
-  -> DO bot.py의 collect_and_post()에 asyncio.gather 태스크 추가
-  -> DO formatter.py의 build_daily_report()에 섹션 추가
-```
-
-### 확장 후보
-
-| 확장 | 변경 범위 | 난이도 |
-|------|----------|--------|
-| 새 수집기 (예: Discord, Medium) | collectors/ 신규 모듈 + formatter 섹션 | 낮음 |
-| 다중 채널 포스팅 | bot.py에 채널 ID 목록 반복 전송 | 낮음 |
-| 알림 빈도 변경 (12시간마다 등) | config.py 스케줄 설정 + scheduler.add_job 추가 | 낮음 |
-| 특정 이벤트 즉시 알림 (가격 급변 등) | 별도 모니터링 루프 필요 | 중간 |
-| 다국어 리포트 | formatter.py 분기 또는 템플릿 시스템 | 중간 |
-| 데이터 히스토리 저장 | DB(SQLite/PostgreSQL) 도입, 추세 분석 | 높음 |
-| 웹 대시보드 | 별도 FastAPI/Flask 서비스 추가 | 높음 |
-
-## 8. 데이터 모델
-
-### 수집기 출력 데이터 구조
-
-```python
-# Twitter
-@dataclass
-class TweetData:
-    username: str
-    text: str
-    created_at: datetime
-    url: str
-    likes: int = 0
-    retweets: int = 0
-    replies: int = 0
-    media_urls: list = field(default_factory=list)
-
-# CantonScan
-@dataclass
-class CantonScanData:
-    daily_burn: Optional[float] = None
-    daily_mint: Optional[float] = None
-    burn_mint_ratio: Optional[float] = None
-    total_burned: Optional[float] = None
-    total_supply: Optional[float] = None
-    daily_transactions: Optional[int] = None
-    daily_active_addresses: Optional[int] = None
-    raw_data: dict = field(default_factory=dict)
-    fetched: bool = False
-
-# Price
-@dataclass
-class PriceData:
-    current_price_usd: Optional[float] = None
-    price_change_24h: Optional[float] = None
-    price_change_percentage_24h: Optional[float] = None
-    high_24h: Optional[float] = None
-    low_24h: Optional[float] = None
-    market_cap: Optional[float] = None
-    total_volume_24h: Optional[float] = None
-    circulating_supply: Optional[float] = None
-    fetched: bool = False
-```
-
-## 9. 검증 게이트
-
-| 검증 항목 | 명령어 | 기대 결과 |
-|----------|--------|----------|
-| 의존성 설치 확인 | `pip install -r requirements.txt` | 에러 없이 완료 |
-| 설정 검증 | `python -c "import config; print(config.TELEGRAM_BOT_TOKEN[:5] if config.TELEGRAM_BOT_TOKEN else 'NOT SET')"` | 토큰 앞 5자 또는 NOT SET |
-| 즉시 실행 테스트 | `python bot.py --now` | 리포트 생성 (토큰 없으면 미리보기) |
-| Playwright 설치 확인 | `python -c "from playwright.sync_api import sync_playwright; print('OK')"` | OK |
-
-## Change Log
+## 6. Change Log
 
 | 날짜 | 변경 | 이유 |
 |------|------|------|
-| 2026-03-31 | 초기 생성 | docs-init으로 자동 생성 |
+| 2026-04-14 | 초기 생성 | docs-init으로 자동 생성, `canton-bot/` 분리 후 첫 SYSTEM_OVERVIEW |

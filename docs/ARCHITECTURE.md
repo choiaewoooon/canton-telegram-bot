@@ -1,333 +1,207 @@
-# ARCHITECTURE.md - Canton Telegram Bot
+# ARCHITECTURE — canton-telegram-bot
 
-> **Update Trigger**: 새 수집기 추가, 데이터 모델 변경, 의존성 변경 시 이 문서를 갱신할 것.
+> **업데이트 트리거**: `bot.py` 실행 플로우 변경 / 새 collector 추가 / LaunchAgent plist 구조 변경 / fallback chain 수정 시 즉시 이 문서를 갱신한다.
 
-## 1. System Architecture
+| Meta | Value |
+|------|-------|
+| Project | canton-telegram-bot |
+| Type | pipeline (daily report) |
+| Runtime | Python 3.11+ |
+| Schedule | 매일 09:00 KST 1회 (macOS launchd) |
+| Entry | `python bot.py --now` (one-shot) / `python bot.py` (APScheduler) |
+| Isolation | canton-hub와 **완전 분리** (코드/상태/API 쿼터 공유 없음) |
 
-```mermaid
-graph TD
-    subgraph Scheduler
-        A[APScheduler<br/>cron: 09:00 KST]
-    end
+---
 
-    subgraph Entrypoint
-        B[bot.py]
-    end
-
-    subgraph Collectors ["collectors/ (asyncio.gather)"]
-        C1[TwitterCollector<br/>twscrape]
-        C2[CantonScanCollector<br/>httpx + bs4 + playwright]
-        C3[PriceCollector<br/>httpx]
-    end
-
-    subgraph External ["External Sources"]
-        E1[Twitter/X API]
-        E2[cantonscan.com]
-        E3[CoinGecko API]
-    end
-
-    subgraph Output
-        F[formatter.py<br/>HTML Message Builder]
-        G[Telegram Bot API]
-        H[Telegram Channel]
-    end
-
-    A -->|trigger| B
-    B -->|async| C1
-    B -->|async| C2
-    B -->|async| C3
-    C1 --> E1
-    C2 --> E2
-    C3 --> E3
-    C1 -->|dict&lt;str, list&lt;TweetData&gt;&gt;| F
-    C2 -->|CantonScanData| F
-    C3 -->|PriceData| F
-    F -->|HTML string| G
-    G --> H
-```
-
-### ASCII Diagram (Fallback)
+## 1. System Diagram
 
 ```
-                          +------------------+
-                          |   APScheduler    |
-                          |  cron 09:00 KST  |
-                          +--------+---------+
-                                   |
-                                   v
-                          +--------+---------+
-                          |     bot.py       |
-                          | collect_and_post |
-                          +--------+---------+
-                                   |
-                    +--------------+--------------+
-                    |              |              |
-                    v              v              v
-          +---------+---+ +-------+------+ +-----+--------+
-          | Twitter     | | CantonScan   | | Price        |
-          | Collector   | | Collector    | | Collector    |
-          | (twscrape)  | | (httpx/bs4/  | | (httpx)      |
-          |             | |  playwright) | |              |
-          +------+------+ +------+-------+ +------+-------+
-                 |               |                |
-                 v               v                v
-           Twitter/X       cantonscan.com    CoinGecko API
-                 |               |                |
-                 +-------+-------+--------+-------+
-                         |
-                         v
-                  +------+------+
-                  | formatter.py |
-                  | (HTML build) |
-                  +------+-------+
-                         |
-                         v
-                  +------+-------+
-                  | Telegram Bot |
-                  |   send_msg   |
-                  +--------------+
+┌─────────────────────────────────────────────────────────────────┐
+│ macOS launchd (com.cobling.canton-bot.plist)                    │
+│   StartCalendarInterval: Hour=9, Minute=0 KST                   │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ spawns
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ bot.py --now  →  collect_and_post()                             │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ asyncio.gather(return_exceptions=True)
+          ┌────────────────┼────────────────┐
+          ▼                ▼                ▼
+  ┌──────────────┐ ┌───────────────┐ ┌──────────────┐
+  │ Twitter      │ │ CantonScan    │ │ Price        │
+  │ Collector    │ │ Collector     │ │ Collector    │
+  │ (RapidAPI)   │ │ (API→HTML→PW) │ │ (CoinGecko)  │
+  └──────┬───────┘ └───────┬───────┘ └──────┬───────┘
+         │ TweetData[]     │ CantonScanData │ PriceData
+         ▼                 ▼                ▼
+  ┌─────────────────────────────────────────────────┐
+  │ tweet_summarizer.summarize_tweets() (AI 번역/요약) │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │ formatter.build_daily_report() → HTML string    │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │ chart_generator.generate_chart_base64() (mpl)   │
+  │ image_generator.generate_daily_card()           │
+  │   (Jinja2 + templates/daily_card.html → PNG)    │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │ telegram.Bot.send_photo(caption=HTML)           │
+  │   └ fallback: send_message(HTML)                │
+  └─────────────────────────────────────────────────┘
 ```
 
-## 2. Component Reference
+---
 
-| Component | File | Responsibility | Input | Output |
-|-----------|------|---------------|-------|--------|
-| Entrypoint / Scheduler | `bot.py` | CLI 파싱, APScheduler cron 등록, 수집-포맷-전송 오케스트레이션 | CLI args (`--now`) | Telegram message sent |
-| Config | `config.py` | `.env` 환경변수 로드, 상수 정의 | `.env` file | Module-level constants |
-| Twitter Collector | `collectors/twitter_collector.py` | @CantonNetwork, @CantonFdn 최근 24h 트윗 수집 | config (credentials, accounts) | `dict[str, list[TweetData]]` |
-| CantonScan Collector | `collectors/cantonscan_collector.py` | cantonscan.com/stats 네트워크 지표 스크래핑 | config (URLs) | `CantonScanData` |
-| Price Collector | `collectors/price_collector.py` | CoinGecko에서 $CC 토큰 가격 데이터 수집 | config (coin ID, API key) | `PriceData` |
-| Formatter | `formatter.py` | 수집 데이터를 Telegram HTML 메시지로 조합 | TweetData, CantonScanData, PriceData | `str` (HTML) |
+## 2. Module Dependency Map
 
-## 3. Data Models
+| Module | Depends On | Purpose |
+|--------|-----------|---------|
+| `bot.py` | `formatter`, `chart_generator`, `image_generator`, `tweet_summarizer`, `collectors/*` | 오케스트레이션 엔트리포인트 |
+| `collectors/twitter_collector.py` | `httpx`, RapidAPI | 트윗 수집, `TweetData` 반환 |
+| `collectors/cantonscan_collector.py` | `httpx`, `beautifulsoup4`, `playwright` | Canton 체인 스탯 수집, `CantonScanData` 반환 |
+| `collectors/price_collector.py` | `httpx`, CoinGecko API | $CC 가격 수집, `PriceData` 반환 |
+| `tweet_summarizer.py` | LLM API | `list[TweetData]` → 한국어 요약 문자열 |
+| `formatter.py` | dataclasses | HTML 메시지 빌드 |
+| `chart_generator.py` | `matplotlib` | 최근 가격 라인차트 → base64 PNG |
+| `image_generator.py` | `jinja2`, `playwright` (or HTML→image lib) | `daily_card.html` 렌더 → PNG bytes |
 
-```python
-@dataclass
-class TweetData:
-    username: str
-    text: str
-    created_at: datetime
-    url: str
-    likes: int = 0
-    retweets: int = 0
-    replies: int = 0
-    media_urls: list = field(default_factory=list)
+> **경고**: `collectors/`는 canton-hub의 동명 모듈과 **독립적인 복사본**이다. 수정 시 양쪽 프로젝트를 각각 갱신해야 한다.
 
-@dataclass
-class CantonScanData:
-    daily_burn: Optional[float] = None
-    daily_mint: Optional[float] = None
-    burn_mint_ratio: Optional[float] = None
-    total_burned: Optional[float] = None
-    total_supply: Optional[float] = None
-    daily_transactions: Optional[int] = None
-    daily_active_addresses: Optional[int] = None
-    raw_data: dict = field(default_factory=dict)
-    fetched: bool = False
+---
 
-@dataclass
-class PriceData:
-    current_price_usd: Optional[float] = None
-    price_change_24h: Optional[float] = None
-    price_change_percentage_24h: Optional[float] = None
-    high_24h: Optional[float] = None
-    low_24h: Optional[float] = None
-    market_cap: Optional[float] = None
-    total_volume_24h: Optional[float] = None
-    circulating_supply: Optional[float] = None
-    fetched: bool = False
+## 3. Data Flow (9-Step Execution)
+
+| Step | Action | Location | Failure Mode |
+|------|--------|----------|--------------|
+| 1 | 3개 collector 인스턴스 초기화 | `bot.collect_and_post()` | 생성자 실패 → 프로세스 종료 |
+| 2 | `asyncio.gather(twitter, cantonscan, price, return_exceptions=True)` 병렬 실행 | `bot.py` | 각 collector 독립 실패 허용 |
+| 3 | 예외가 반환된 항목은 **빈 dataclass**로 치환 (`fetched=False`) | `bot.py` | — |
+| 4 | `tweets` 비어있지 않으면 `await summarize_tweets(tweets)` 호출 | `tweet_summarizer` | 실패 시 summary=None |
+| 5 | `build_daily_report(tweets, scan_data, price_data, tweet_summary)` → HTML | `formatter.py` | 필수 |
+| 6 | `TELEGRAM_BOT_TOKEN` 없으면 **preview mode**: HTML 태그 제거 후 stdout 출력, exit | `bot.py` | — |
+| 7a | `chart_b64 = await generate_chart_base64()` | `chart_generator.py` | 실패 시 텍스트 폴백 |
+| 7b | `image_bytes = await generate_daily_card(scan_data, price_data, date_str, chart_b64)` | `image_generator.py` | 실패 시 텍스트 폴백 |
+| 7c | 성공: `bot.send_photo(chat_id, photo=image_bytes, caption=message, parse_mode=HTML)` | `python-telegram-bot` | 실패 시 Step 7d |
+| 7d | 폴백: `bot.send_message(chat_id, text=message, parse_mode=HTML, disable_web_page_preview=True)` | `python-telegram-bot` | 재시도 없음 |
+| 8 | `logger.info("텔레그램 전송 완료")` | `bot.py` | — |
+| 9 | Cleanup: `await cantonscan.close()`, `await price.close()` (httpx client 종료) | `bot.py` | finally 블록 권장 |
+
+---
+
+## 4. Fallback Chains
+
+### 4.1 TwitterCollector
+```
+RapidAPI user_tweets endpoint
+    ↓ (rate limit / 5xx / empty)
+RapidAPI search endpoint
+    ↓ (실패)
+빈 list[TweetData]  →  formatter가 트위터 섹션 생략
 ```
 
-## 4. Data Flow
-
+### 4.2 CantonScanCollector
 ```
-WHEN APScheduler triggers (09:00 KST) OR --now flag passed
-  DO bot.py::collect_and_post()
-
-STEP 1: Initialize collectors
-  TwitterCollector(), CantonScanCollector(), PriceCollector()
-
-STEP 2: Parallel collection (asyncio.gather, return_exceptions=True)
-  Task 1: twitter.collect_all()       -> dict[str, list[TweetData]]
-  Task 2: cantonscan.collect()        -> CantonScanData
-  Task 3: price.collect()             -> PriceData
-
-STEP 3: Exception handling
-  WHEN task result is Exception -> log error, use empty default
-
-STEP 4: Format message
-  formatter.build_daily_report(tweets, scan_data, price_data) -> HTML str
-
-STEP 5: Send to Telegram
-  WHEN TELEGRAM_BOT_TOKEN is empty -> print preview to stdout
-  WHEN TELEGRAM_BOT_TOKEN is set   -> Bot.send_message(HTML, disable_web_page_preview=True)
-
-STEP 6: Cleanup
-  cantonscan.close(), price.close()  (httpx client shutdown)
+CantonScan JSON API
+    ↓ (4xx/5xx)
+HTML scraping (httpx + BeautifulSoup)
+    ↓ (JS 렌더 필요 / 파싱 실패)
+Playwright Chromium headless
+    ↓ (실패)
+빈 CantonScanData(fetched=False)
 ```
 
-## 5. Fallback Strategies
-
-각 수집기는 다단계 폴백을 구현하여 단일 장애 지점을 최소화합니다.
-
-### 5.1 TwitterCollector
-
-| Priority | Strategy | Method | Trigger |
-|----------|----------|--------|---------|
-| 1 | `user_tweets` | `api.user_tweets(user_id, limit=10)` | Default |
-| 2 | `search` | `api.search("from:{username}", limit=10)` | WHEN user_id lookup fails OR user_tweets raises Exception |
-
-Authentication fallback:
-
-| Priority | Method | Condition |
-|----------|--------|-----------|
-| 1 | Cookie-based | WHEN `TWITTER_COOKIES` is set |
-| 2 | Username/Password + login | WHEN cookies empty, credentials present |
-| 3 | Skip | WHEN no credentials at all |
-
-### 5.2 CantonScanCollector
-
-| Priority | Strategy | Method | Trigger |
-|----------|----------|--------|---------|
-| 1 | API endpoints | 6개 후보 URL에 GET 요청, JSON content-type 확인 | Default |
-| 2 | HTML parsing | `httpx.get(stats_url)` + BeautifulSoup stat card 패턴 매칭 | WHEN all API endpoints fail |
-| 3 | Playwright | Headless Chromium, network response 가로채기 + 렌더링된 HTML 파싱 | WHEN HTML parsing fails |
-
-Playwright 상세:
-- Network response interception으로 API endpoint 자동 발견 시도
-- 실패 시 렌더링된 DOM에서 `_parse_html()` 재시도
-- 최종 실패 시 `page.inner_text("body")` 원문 2000자 저장 (디버깅용)
-
-### 5.3 PriceCollector
-
-| Priority | Strategy | Endpoint | Data Richness |
-|----------|----------|----------|---------------|
-| 1 | Markets API | `/coins/markets?ids=canton` | Full (price, 24h change, high/low, mcap, volume, supply) |
-| 2 | Simple Price API | `/simple/price?ids=canton` | Partial (price, 24h change, mcap, volume) |
-
-## 6. Async Execution Model
-
+### 4.3 PriceCollector
 ```
-bot.py::collect_and_post() [single coroutine]
-  |
-  +-- asyncio.create_task(twitter.collect_all())
-  |     |-- collect_recent_tweets("CantonNetwork")  [sequential per account]
-  |     |     |-- api.user_tweets() OR _collect_via_search()
-  |     |-- asyncio.sleep(2)  [rate limit guard]
-  |     |-- collect_recent_tweets("CantonFdn")
-  |
-  +-- asyncio.create_task(cantonscan.collect())
-  |     |-- _try_api_endpoints()  [sequential per endpoint]
-  |     |-- _fetch_html() + _parse_html()
-  |     |-- _fetch_with_playwright()
-  |
-  +-- asyncio.create_task(price.collect())
-        |-- _fetch_markets_data()
-        |-- _fetch_simple_price()
-
-asyncio.gather(task1, task2, task3, return_exceptions=True)
-  -> 3개 태스크 병렬 실행, 개별 예외 격리
+CoinGecko /coins/markets
+    ↓ (rate limit / 5xx)
+CoinGecko /simple/price
+    ↓ (실패)
+빈 PriceData(fetched=False)
 ```
 
-**Key Design Decisions**:
-
-| Decision | Rationale |
-|----------|-----------|
-| `asyncio.gather` with `return_exceptions=True` | 한 수집기 실패가 다른 수집기를 블로킹하지 않음 |
-| Twitter 계정 간 2초 딜레이 | Rate limit 회피 (계정 내부는 순차) |
-| CantonScan 폴백은 순차 | 이전 단계 실패 시에만 다음 단계 시도 (불필요한 리소스 소비 방지) |
-| `misfire_grace_time=3600` | 시스템 일시 중단 후 최대 1시간 내 재실행 허용 |
-
-## 7. Scheduler
-
-| Setting | Value | Source |
-|---------|-------|--------|
-| Scheduler | `APScheduler AsyncIOScheduler` | `bot.py::run_scheduler()` |
-| Trigger | `cron` | `hour=9, minute=0` (configurable via env) |
-| Timezone | `Asia/Seoul` (KST) | `config.TIMEZONE` |
-| Misfire Grace | 3600s (1h) | Hardcoded in `bot.py` |
-| Immediate Mode | `python bot.py --now` | `asyncio.run(collect_and_post())` |
-
-## 8. Dependency Graph
-
+### 4.4 Image Pipeline
 ```
-bot.py
-  +-- config.py
-  |     +-- python-dotenv
-  +-- collectors/__init__.py
-  |     +-- twitter_collector.py
-  |     |     +-- twscrape
-  |     |     +-- config.py
-  |     +-- cantonscan_collector.py
-  |     |     +-- httpx
-  |     |     +-- beautifulsoup4
-  |     |     +-- playwright (optional, fallback)
-  |     |     +-- config.py
-  |     +-- price_collector.py
-  |           +-- httpx
-  |           +-- config.py
-  +-- formatter.py
-  |     +-- collectors (TweetData, CantonScanData, PriceData)
-  |     +-- config.py
-  +-- APScheduler
-  +-- python-telegram-bot
+chart_generator (matplotlib)
+    ↓
+image_generator (Jinja2 + daily_card.html → PNG)
+    ↓
+bot.send_photo(caption=HTML)
+    ↓ (이미지 생성/전송 실패)
+bot.send_message(HTML, disable_web_page_preview=True)
 ```
 
-### External Dependencies (requirements.txt)
+**규칙**: WHEN 이미지 파이프라인 실패 → DO 텍스트 메시지로 폴백. 재시도 없음.
 
-| Package | Version | Used By |
-|---------|---------|---------|
-| `python-telegram-bot` | >=21.0 | `bot.py` - Telegram API client |
-| `twscrape` | >=0.12 | `twitter_collector.py` - Twitter scraping |
-| `httpx` | >=0.25 | `cantonscan_collector.py`, `price_collector.py` - Async HTTP |
-| `beautifulsoup4` | >=4.12 | `cantonscan_collector.py` - HTML parsing |
-| `python-dotenv` | >=1.0 | `config.py` - .env loading |
-| `APScheduler` | >=3.10 | `bot.py` - Cron scheduling |
-| `playwright` | >=1.40 | `cantonscan_collector.py` - Headless browser fallback |
+---
 
-### Standard Library Dependencies
+## 5. Infrastructure — LaunchAgent
 
-| Module | Used By |
-|--------|---------|
-| `asyncio` | `bot.py`, `twitter_collector.py` |
-| `argparse` | `bot.py` |
-| `logging` | All modules |
-| `dataclasses` | All collectors |
-| `datetime`, `zoneinfo` | `bot.py`, `formatter.py`, `twitter_collector.py` |
-| `re` | `cantonscan_collector.py`, `bot.py` |
+**Path**: `~/Library/LaunchAgents/com.cobling.canton-bot.plist`
 
-## 9. Environment Variables
+| Key | Current (KeepAlive mode) | Future (One-shot mode) |
+|-----|--------------------------|------------------------|
+| `Label` | `com.cobling.canton-bot` | `com.cobling.canton-bot` |
+| `ProgramArguments` | `.venv/bin/python bot.py` | `.venv/bin/python bot.py --now` |
+| `KeepAlive` | `true` (APScheduler 내부 스케줄링) | `false` |
+| `StartCalendarInterval` | — | `Hour=9, Minute=0` |
+| `WorkingDirectory` | 프로젝트 루트 | 프로젝트 루트 |
+| `StandardOutPath` | `launchd_stdout.log` | `launchd_stdout.log` |
+| `StandardErrorPath` | `launchd_stderr.log` | `launchd_stderr.log` |
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Yes (for send) | `""` | Telegram Bot API token |
-| `TELEGRAM_CHANNEL_ID` | Yes (for send) | `""` | Target channel ID or @handle |
-| `TWITTER_USERNAME` | Yes (for tweets) | `""` | twscrape auth |
-| `TWITTER_PASSWORD` | Yes (for tweets) | `""` | twscrape auth |
-| `TWITTER_EMAIL` | Yes (for tweets) | `""` | twscrape auth |
-| `TWITTER_EMAIL_PASSWORD` | Optional | `""` | IMAP verification |
-| `TWITTER_COOKIES` | Optional | `""` | Cookie-based auth (preferred) |
-| `COINGECKO_API_KEY` | Optional | `""` | Rate limit relief |
-| `SCHEDULE_HOUR` | Optional | `9` | Cron hour (KST) |
-| `SCHEDULE_MINUTE` | Optional | `0` | Cron minute |
-| `TIMEZONE` | Optional | `Asia/Seoul` | Scheduler timezone |
-
-## 10. Verification
-
+**운영 명령**:
 ```bash
-# 즉시 실행 테스트 (Telegram 토큰 없으면 미리보기 모드)
-python bot.py --now
-
-# 의존성 확인
-pip install -r requirements.txt
-playwright install chromium
-
-# 로그 확인
-tail -f bot.log
+# 로드
+launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist
+# 언로드
+launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist
+# 즉시 실행(테스트)
+launchctl start com.cobling.canton-bot
+# 상태 확인
+launchctl list | grep canton-bot
 ```
+
+**마이그레이션 계획**: KeepAlive 모드는 프로세스 상주로 인한 메모리 누수 위험. One-shot 모드로 전환 예정 — `StartCalendarInterval`이 9시에 프로세스를 띄우고 `--now` 실행 후 즉시 종료.
+
+---
+
+## 6. canton-telegram-bot vs canton-hub
+
+| 항목 | canton-telegram-bot | canton-hub |
+|------|---------------------|------------|
+| 목적 | **일 1회** 데일리 리포트 전송 | 실시간 대시보드/허브 |
+| 트리거 | launchd 09:00 KST | 상시 구동 |
+| 엔트리 | `bot.py --now` | (별도) |
+| Collectors | `collectors/` 독립 복사본 | 동명 모듈 (별도 복사본) |
+| 상태 공유 | **없음** | **없음** |
+| API 쿼터 | **독립** (RapidAPI / CoinGecko 키 각자 관리) | **독립** |
+| 프로세스 | 단발성 (또는 KeepAlive) | 상시 |
+| 장애 전파 | canton-hub에 영향 없음 | canton-telegram-bot에 영향 없음 |
+
+**격리 원칙**:
+1. WHEN canton-hub에서 collector 버그 발견 → DO 이 프로젝트의 `collectors/`도 **수동으로** 동일 수정
+2. WHEN RapidAPI 쿼터 소진 → 두 프로젝트 중 하나만 영향 (별도 키 사용 권장)
+3. 두 프로젝트는 **어떤 파일시스템 경로도 공유하지 않는다**
+
+---
+
+## 7. Verification Gates
+
+| Gate | Command | Expected |
+|------|---------|----------|
+| 로컬 프리뷰 | `TELEGRAM_BOT_TOKEN= python bot.py --now` | HTML 태그 제거된 리포트가 stdout 출력 |
+| 실전 전송 테스트 | `python bot.py --now` (env 설정 후) | 텔레그램 채팅에 이미지+캡션 수신 |
+| LaunchAgent 검증 | `launchctl list \| grep canton-bot` | PID 또는 `-` (last exit status 0) |
+| 로그 확인 | TODO: `tail -f launchd_stdout.log` | "텔레그램 전송 완료" 라인 존재 |
+
+---
 
 ## Change Log
 
-| Date | Change | Reason |
-|------|--------|--------|
-| 2026-03-31 | Initial creation | docs-init auto-generated |
+| 날짜 | 변경 | 이유 |
+|------|------|------|
+| 2026-04-14 | 초기 생성 | docs-init으로 자동 생성 |
