@@ -47,7 +47,15 @@ class PriceCollector:
         """$CC 가격 데이터 수집"""
         data = PriceData()
 
-        # 방법 1: /coins/markets (상세 데이터)
+        # 방법 1: canton-hub 로컬 API (같은 Mac의 백엔드가 이미 캐시 보유)
+        try:
+            data = await self._fetch_from_canton_hub()
+            if data.fetched:
+                return data
+        except Exception as e:
+            logger.warning(f"canton-hub API 실패, CoinGecko 직통으로 폴백: {e}")
+
+        # 방법 2: CoinGecko /coins/markets (상세 데이터)
         try:
             data = await self._fetch_markets_data()
             if data.fetched:
@@ -55,12 +63,36 @@ class PriceCollector:
         except Exception as e:
             logger.warning(f"markets API 실패: {e}")
 
-        # 방법 2: /simple/price (기본 데이터, 폴백)
+        # 방법 3: CoinGecko /simple/price (기본 데이터, 최종 폴백)
         try:
             data = await self._fetch_simple_price()
         except Exception as e:
             logger.error(f"simple price API도 실패: {e}")
 
+        return data
+
+    async def _fetch_from_canton_hub(self) -> PriceData:
+        """canton-hub 로컬 백엔드에서 가격 캐시 조회"""
+        url = f"{config.CANTON_HUB_API_URL}/api/price"
+        resp = await self.client.get(url, timeout=2)
+        resp.raise_for_status()
+        d = resp.json()
+
+        if not d or d.get("current_price_usd") is None:
+            return PriceData()
+
+        data = PriceData(
+            current_price_usd=d.get("current_price_usd"),
+            price_change_24h=d.get("price_change_24h"),
+            price_change_percentage_24h=d.get("price_change_percentage_24h"),
+            high_24h=d.get("high_24h"),
+            low_24h=d.get("low_24h"),
+            market_cap=d.get("market_cap"),
+            total_volume_24h=d.get("total_volume_24h"),
+            circulating_supply=d.get("circulating_supply"),
+            fetched=True,
+        )
+        logger.info(f"$CC 가격 수집 완료 (canton-hub): ${data.current_price_usd}")
         return data
 
     async def _fetch_markets_data(self) -> PriceData:

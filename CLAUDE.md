@@ -1,6 +1,6 @@
 # Canton Telegram Bot
 
-매일 아침 9시(KST) Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인. CoinGecko / CantonScan / RapidAPI Twitter API45에서 데이터를 병렬 수집하고, HTML 텔레그램 메시지 + 이미지 카드를 생성해서 `python-telegram-bot` SDK로 전송한다.
+매일 아침 10시(KST) Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인. CoinGecko / CantonScan / RapidAPI Twitter API45에서 데이터를 병렬 수집하고, HTML 텔레그램 메시지 + 이미지 카드를 생성해서 `python-telegram-bot` SDK로 전송한다.
 
 **홈 Mac의 `launchd`에서 구동**. 클라우드 배포 대상이 아님.
 
@@ -66,7 +66,7 @@ canton-telegram-bot/
 | 설치 | `pip install -r requirements.txt && playwright install chromium` |
 | 미리보기 (전송 없음) | `TELEGRAM_BOT_TOKEN= python bot.py --now` |
 | 실제 전송 (1회) | `python bot.py --now` (.env에 토큰 로드됨) |
-| 스케줄러 모드 | `python bot.py` (APScheduler + 매일 9시 KST) |
+| 스케줄러 모드 | `python bot.py` (APScheduler + 매일 10시 KST) |
 | LaunchAgent 로드 | `launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist` |
 | LaunchAgent 언로드 | `launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist` |
 | 수동 발사 (LaunchAgent 경유) | `launchctl kickstart gui/$(id -u)/com.cobling.canton-bot` |
@@ -140,7 +140,7 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `perf`
 - CoinGecko 429 → canton-hub 백엔드와 쿼터 충돌 여부 확인 (같은 홈 Mac IP면 OK, 다르면 OK)
 - RapidAPI 403 → Twitter API45 구독 만료 의심
 - 이미지 생성 계속 실패 → Jinja 템플릿 변수 일치 확인 + matplotlib 폰트 이슈 확인
-- LaunchAgent가 9시에 안 뜸 → Mac이 자고 있었을 가능성. `StartCalendarIntervalRunOnMissedInterval` 설정 확인
+- LaunchAgent가 10시에 안 뜸 → Mac이 자고 있었을 가능성. `StartCalendarIntervalRunOnMissedInterval` 설정 확인
 
 → **추측 금지, 로그부터 확인**
 
