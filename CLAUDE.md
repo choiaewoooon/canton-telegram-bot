@@ -140,7 +140,7 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `perf`
 - CoinGecko 429 → canton-hub 백엔드와 쿼터 충돌 여부 확인 (같은 홈 Mac IP면 OK, 다르면 OK)
 - RapidAPI 403 → Twitter API45 구독 만료 의심
 - 이미지 생성 계속 실패 → Jinja 템플릿 변수 일치 확인 + matplotlib 폰트 이슈 확인
-- LaunchAgent가 10시에 안 뜸 → Mac이 자고 있었을 가능성. `StartCalendarIntervalRunOnMissedInterval` 설정 확인
+- LaunchAgent가 10시에 안 뜸 → Mac이 자고 있었을 가능성. **재기동 보충 발송 로직**이 처리함: 봇 시작 시 오늘 스케줄 시각이 지났고 `.last_sent`(KST 발송일 기록)가 오늘이 아니면 즉시 1회 보충 발송. 절전에서 깬 뒤 launchd가 재기동하면 자동으로 당일 리포트 보장. 중복은 `.last_sent`로 차단
 
 → **추측 금지, 로그부터 확인**
 
@@ -177,3 +177,4 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `perf`
 | 날짜 | 변경 | 이유 |
 |---|---|---|
 | 2026-04-15 | 초기 생성 | docs-init (canton-bot 분리 후 재작성) |
+| 2026-06-02 | 재기동 보충 발송 로직 추가 (`bot.py`) | 절전으로 10시 스케줄 놓치면 당일 리포트 누락 → 재기동 시 `.last_sent` 기준 1회 자동 보충 |

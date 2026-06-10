@@ -52,9 +52,10 @@ async def summarize_tweets(tweets: dict[str, list[TweetData]]) -> str:
 - 텔레그램 HTML 태그만 사용 (<b>, <a href="URL">텍스트</a> 만 가능. 마크다운 금지)
 - 핵심 3-5개 항목만. 비슷한 내용은 하나로 합쳐라
 - 각 항목 앞에 · 사용
+- 각 항목 사이에 빈 줄 한 줄을 반드시 넣어 시각적으로 분리 (즉, 항목 구분은 \n\n)
 - 각 항목 문장 끝에 해당 트윗 원문 링크를 넣어라. 형식: <a href="트윗URL">원문</a>
 - 반응(likes/views) 높은 트윗에 가중치
-- 전체 5줄 이내로 압축
+- 항목별 길이는 자유롭게(빈 줄 포함 8~12줄 가능)
 - 앞뒤에 빈 줄이나 제목 붙이지 마라. 요약 본문만 출력해라
 
 트윗 원문 (번호 → URL):
@@ -97,4 +98,4 @@ def _fallback_format(all_tweets: list[TweetData]) -> str:
         if len(text) > 120:
             text = text[:117] + "..."
         lines.append(f"· {text}")
-    return "\n".join(lines)
+    return "\n\n".join(lines)

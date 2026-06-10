@@ -12,6 +12,7 @@ import logging
 import sys
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -36,6 +37,29 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("canton_bot")
+
+# 마지막으로 리포트를 성공 발송한 KST 날짜(YYYY-MM-DD)를 기록하는 상태 파일.
+# 절전/재기동으로 스케줄 시각을 놓쳤을 때 당일 1회 보충 발송을 판단하는 근거.
+STATE_FILE = Path(__file__).resolve().parent / ".last_sent"
+
+
+def _read_last_sent_date() -> str:
+    """마지막 발송 날짜(YYYY-MM-DD) 반환. 없으면 빈 문자열."""
+    try:
+        return STATE_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        logger.warning(f"상태 파일 읽기 실패: {e}")
+        return ""
+
+
+def _write_last_sent_date(date_str: str) -> None:
+    """발송 성공 시 오늘 날짜를 기록. 실패해도 파이프라인은 죽이지 않음."""
+    try:
+        STATE_FILE.write_text(date_str, encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"상태 파일 기록 실패: {e}")
 
 
 async def collect_and_post():
@@ -127,6 +151,8 @@ async def collect_and_post():
             )
 
         logger.info(f"텔레그램 전송 완료 -> {config.TELEGRAM_CHANNEL_ID}")
+        # 발송 성공 → 오늘 날짜 기록 (재기동 시 중복 발송 방지 + 보충 발송 판단 근거)
+        _write_last_sent_date(kst_now.strftime("%Y-%m-%d"))
 
     except Exception as e:
         logger.error(f"리포트 처리 중 오류: {e}", exc_info=True)
@@ -160,6 +186,18 @@ def run_scheduler():
     logger.info(
         f"스케줄러 시작: 매일 {config.SCHEDULE_HOUR:02d}:{config.SCHEDULE_MINUTE:02d} KST 실행"
     )
+
+    # ── 재기동 보충 발송 ──
+    # 절전/재시작으로 오늘 스케줄 시각을 놓쳤고 아직 미발송이면 즉시 1회 보충.
+    # APScheduler는 프로세스가 죽어 있던 동안의 미스파이어를 자동 보충하지 않으므로 필요.
+    now_kst = datetime.now(kst)
+    today_str = now_kst.strftime("%Y-%m-%d")
+    scheduled_today = now_kst.replace(
+        hour=config.SCHEDULE_HOUR, minute=config.SCHEDULE_MINUTE, second=0, microsecond=0
+    )
+    if now_kst >= scheduled_today and _read_last_sent_date() != today_str:
+        logger.info("재기동 감지: 오늘 리포트 미발송 → 즉시 보충 실행")
+        scheduler.add_job(collect_and_post, trigger="date", id="catch_up_report")
 
     try:
         loop.run_forever()
