@@ -66,13 +66,10 @@ canton-telegram-bot/
 | 설치 | `pip install -r requirements.txt && playwright install chromium` |
 | 미리보기 (전송 없음) | `TELEGRAM_BOT_TOKEN= python bot.py --now` |
 | 실제 전송 (1회) | `python bot.py --now` (.env에 토큰 로드됨) |
-| 스케줄러 모드 (수동, launchd 미사용) | `python bot.py` (APScheduler 상주). **주의: launchd는 이 모드를 쓰지 않는다** — 아래 참조 |
+| 스케줄러 모드 | `python bot.py` (APScheduler + 매일 10시 KST) |
 | LaunchAgent 로드 | `launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist` |
 | LaunchAgent 언로드 | `launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist` |
 | 수동 발사 (LaunchAgent 경유) | `launchctl kickstart gui/$(id -u)/com.cobling.canton-bot` |
-| plist 변경 후 반영 | unload → load (kickstart는 plist 재읽기 안 함) |
-
-> **실행 모델 (2026-07-02 변경)**: launchd는 **`bot.py --now`(1회 실행 후 종료)를 `StartCalendarInterval`로 매일 10시 KST에 새 프로세스로 띄운다.** 장수명 APScheduler 데몬이 아니다. 이유: 상주 데몬은 코드를 고쳐도 재시작 전까지 옛 코드를 메모리에 물고 있어, 파일만 고치고 데몬을 안 껐다 켜면 반영이 안 되는 사고가 났다(2026-07-02, 요약이 계속 영어로 나감). 1회성 실행은 **매번 최신 코드**라 이 함정이 없다. 코드 수정 후 별도 재시작 불필요.
 | 로그 확인 | `tail -f launchd_stdout.log launchd_stderr.log bot.log` |
 
 ## 2. Workflow Protocols
@@ -143,7 +140,7 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `perf`
 - CoinGecko 429 → canton-hub 백엔드와 쿼터 충돌 여부 확인 (같은 홈 Mac IP면 OK, 다르면 OK)
 - RapidAPI 403 → Twitter API45 구독 만료 의심
 - 이미지 생성 계속 실패 → Jinja 템플릿 변수 일치 확인 + matplotlib 폰트 이슈 확인
-- LaunchAgent가 10시에 안 뜸 → Mac이 자고 있었을 가능성. **launchd `StartCalendarInterval`이 처리함**: 절전으로 10시를 놓치면 깨어날 때 launchd가 그 1회를 실행해줌(별도 코드 불필요). (참고: `bot.py`의 내부 `.last_sent` 보충 로직은 상주 스케줄러 모드용 잔존 코드이며, 현재 launchd `--now` 경로에선 쓰이지 않음.)
+- LaunchAgent가 10시에 안 뜸 → Mac이 자고 있었을 가능성. **재기동 보충 발송 로직**이 처리함: 봇 시작 시 오늘 스케줄 시각이 지났고 `.last_sent`(KST 발송일 기록)가 오늘이 아니면 즉시 1회 보충 발송. 절전에서 깬 뒤 launchd가 재기동하면 자동으로 당일 리포트 보장. 중복은 `.last_sent`로 차단
 
 → **추측 금지, 로그부터 확인**
 

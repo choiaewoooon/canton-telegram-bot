@@ -9,6 +9,7 @@ Canton Telegram Bot - 메인 실행 파일
 import asyncio
 import argparse
 import logging
+import re
 import sys
 from datetime import datetime
 from io import BytesIO
@@ -18,6 +19,17 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, NetworkError
+
+
+def _strip_html(text: str) -> str:
+    """HTML 파싱 실패 시 최후 폴백: 모든 태그 제거 + 엔티티 복원 → 평문."""
+    t = re.sub(r"<\s*br\s*/?\s*>", "\n", text, flags=re.IGNORECASE)
+    t = re.sub(r"<[^>]+>", "", t)
+    return (
+        t.replace("&lt;", "<").replace("&gt;", ">")
+        .replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&")
+    )
 
 import config
 from collectors import TwitterCollector, CantonScanCollector, PriceCollector
@@ -37,6 +49,12 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("canton_bot")
+
+# 이미지 카드 생성·전송 재시도 설정.
+# 순간 네트워크 블립(2026-07-08: httpx.ConnectError로 sendPhoto 1회 실패 → 그날 이미지 누락)에
+# 대비해, 이미지가 캡션과 함께 항상 한 덩어리로 나가도록 생성/전송을 backoff 재시도한다.
+IMAGE_MAX_ATTEMPTS = 3      # 생성·전송 각각 최대 시도 횟수
+IMAGE_RETRY_BASE_SEC = 3    # backoff 기준(초): 시도 사이 3s, 6s 대기 (마지막 시도 뒤엔 대기 없음)
 
 # 마지막으로 리포트를 성공 발송한 KST 날짜(YYYY-MM-DD)를 기록하는 상태 파일.
 # 절전/재기동으로 스케줄 시각을 놓쳤을 때 당일 1회 보충 발송을 판단하는 근거.
@@ -60,6 +78,60 @@ def _write_last_sent_date(date_str: str) -> None:
         STATE_FILE.write_text(date_str, encoding="utf-8")
     except Exception as e:
         logger.warning(f"상태 파일 기록 실패: {e}")
+
+
+async def _send_daily_post(bot, channel_id, message: str, image_bytes: bytes | None) -> None:
+    """이미지 카드 + 캡션(내용+트윗요약)을 항상 한 덩어리로 전송한다.
+
+    순간 네트워크 블립(httpx.ConnectError → telegram NetworkError)으로 이미지가 빠지지
+    않도록 전송을 backoff 재시도한다. 이미지·내용·요약은 함께 나가며, 재시도까지 모두
+    실패한 극단적 경우에만 텍스트 폴백으로 당일 리포트를 발송한다(사용자 선택 2026-07-08).
+    """
+    if image_bytes:
+        for attempt in range(1, IMAGE_MAX_ATTEMPTS + 1):
+            try:
+                await bot.send_photo(
+                    chat_id=channel_id,
+                    photo=BytesIO(image_bytes),
+                    caption=message,
+                    parse_mode=ParseMode.HTML,
+                )
+                logger.info("이미지 + 텍스트 전송 완료")
+                return
+            except BadRequest as e:
+                # HTML 캡션 파싱 오류(미허용 태그 등) → 재시도해도 동일. 평문 폴백으로.
+                logger.warning(f"HTML 캡션 파싱 오류로 이미지 전송 실패 → 평문 폴백: {e}")
+                break
+            except NetworkError as e:
+                # 일시적 네트워크 오류(ConnectError/타임아웃) → backoff 후 재시도
+                logger.warning(
+                    f"이미지 전송 네트워크 오류, 재시도 (시도 {attempt}/{IMAGE_MAX_ATTEMPTS}): {e}"
+                )
+                if attempt < IMAGE_MAX_ATTEMPTS:
+                    await asyncio.sleep(attempt * IMAGE_RETRY_BASE_SEC)
+            except Exception as e:
+                # 비일시적 오류(권한 등) → 재시도 무의미. 텍스트 폴백으로.
+                logger.warning(f"이미지 전송 실패(비일시적) → 텍스트 폴백: {e!r}")
+                break
+        else:
+            # for-else: break 없이 모든 재시도 소진(네트워크 오류만 반복)
+            logger.error(f"이미지 전송 {IMAGE_MAX_ATTEMPTS}회 모두 실패 → 텍스트 폴백(최후)")
+
+    # 최후 폴백: 이미지가 끝내 실패하면 텍스트라도 반드시 발송
+    try:
+        await bot.send_message(
+            chat_id=channel_id,
+            text=message,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except BadRequest as e:
+        logger.warning(f"HTML 파싱 실패 → 평문으로 재전송: {e}")
+        await bot.send_message(
+            chat_id=channel_id,
+            text=_strip_html(message),
+            disable_web_page_preview=True,
+        )
 
 
 async def collect_and_post():
@@ -121,34 +193,29 @@ async def collect_and_post():
             logger.error("TELEGRAM_CHANNEL_ID가 설정되지 않았습니다!")
             return
 
-        # 이미지 카드 생성 + 캡션으로 텍스트 포함하여 단일 게시물 전송
+        # 이미지 카드 생성(재시도) + 캡션으로 단일 게시물 전송.
+        # 이미지·내용·트윗요약은 항상 한 덩어리로 나간다(_send_daily_post).
         kst_now = datetime.now(kst)
         date_str = kst_now.strftime("%Y.%m.%d %a")
-        sent = False
 
+        # ── 이미지 카드 생성 (일시적 실패 대비 재시도) ──
+        image_bytes = None
         try:
             chart_b64 = await generate_chart_base64()
-            image_bytes = await generate_daily_card(scan_data, price_data, date_str, chart_b64)
-            if image_bytes:
-                await bot.send_photo(
-                    chat_id=config.TELEGRAM_CHANNEL_ID,
-                    photo=BytesIO(image_bytes),
-                    caption=message,
-                    parse_mode=ParseMode.HTML,
+            for attempt in range(1, IMAGE_MAX_ATTEMPTS + 1):
+                image_bytes = await generate_daily_card(
+                    scan_data, price_data, date_str, chart_b64
                 )
-                sent = True
-                logger.info("이미지 + 텍스트 전송 완료")
+                if image_bytes:
+                    break
+                logger.warning(f"이미지 카드 생성 실패 (시도 {attempt}/{IMAGE_MAX_ATTEMPTS})")
+                if attempt < IMAGE_MAX_ATTEMPTS:
+                    await asyncio.sleep(attempt * IMAGE_RETRY_BASE_SEC)
         except Exception as e:
-            logger.warning(f"이미지 전송 실패, 텍스트만 전송합니다: {e}")
+            logger.warning(f"차트/이미지 생성 중 예외 → 텍스트 폴백: {e!r}")
 
-        # 이미지 실패 시 텍스트만 전송
-        if not sent:
-            await bot.send_message(
-                chat_id=config.TELEGRAM_CHANNEL_ID,
-                text=message,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
+        # ── 전송: 이미지+내용+요약을 한 덩어리로(재시도). 끝내 실패 시 텍스트 폴백 ──
+        await _send_daily_post(bot, config.TELEGRAM_CHANNEL_ID, message, image_bytes)
 
         logger.info(f"텔레그램 전송 완료 -> {config.TELEGRAM_CHANNEL_ID}")
         # 발송 성공 → 오늘 날짜 기록 (재기동 시 중복 발송 방지 + 보충 발송 판단 근거)

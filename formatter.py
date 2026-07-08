@@ -96,15 +96,14 @@ def build_daily_report(
         lines.append("")
     elif total_tweets > 0:
         lines.append(f"<b>\U0001f5de\ufe0f 트위터 소식 정리</b>")
-        fallback_lines = []
+        # 요약이 비어서 온 경우: 영어 원문을 그대로 덤프하지 않고 한국어 안내 + 원문 링크만.
+        fallback_lines = ["· 오늘 트위터 요약을 불러오지 못함. 원문 링크만 첨부:"]
         for account, tw_list in tweets.items():
             if not tw_list:
                 continue
             for tw in sorted(tw_list, key=lambda t: t.created_at, reverse=True)[:3]:
-                text = tw.text.replace("<", "&lt;").replace(">", "&gt;")
-                if len(text) > 150:
-                    text = text[:147] + "..."
-                fallback_lines.append(f"· {text}")
+                when = tw.created_at.strftime("%m/%d %H:%M")
+                fallback_lines.append(f'· @{tw.username} ({when}) <a href="{tw.url}">원문</a>')
         lines.append(f"<blockquote>{chr(10).join(fallback_lines)}</blockquote>")
         lines.append("")
 

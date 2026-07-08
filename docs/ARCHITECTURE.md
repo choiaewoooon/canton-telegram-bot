@@ -65,7 +65,7 @@
 | `collectors/twitter_collector.py` | `httpx`, RapidAPI | 트윗 수집, `TweetData` 반환 |
 | `collectors/cantonscan_collector.py` | `httpx`, `beautifulsoup4`, `playwright` | Canton 체인 스탯 수집, `CantonScanData` 반환 |
 | `collectors/price_collector.py` | `httpx`, CoinGecko API | $CC 가격 수집, `PriceData` 반환 |
-| `tweet_summarizer.py` | LLM API | `list[TweetData]` → 한국어 요약 문자열 |
+| `tweet_summarizer.py` | Gemini CLI (`gemq`, subprocess) | `list[TweetData]` → 한국어 요약 문자열 |
 | `formatter.py` | dataclasses | HTML 메시지 빌드 |
 | `chart_generator.py` | `matplotlib` | 최근 가격 라인차트 → base64 PNG |
 | `image_generator.py` | `jinja2`, `playwright` (or HTML→image lib) | `daily_card.html` 렌더 → PNG bytes |
@@ -81,7 +81,7 @@
 | 1 | 3개 collector 인스턴스 초기화 | `bot.collect_and_post()` | 생성자 실패 → 프로세스 종료 |
 | 2 | `asyncio.gather(twitter, cantonscan, price, return_exceptions=True)` 병렬 실행 | `bot.py` | 각 collector 독립 실패 허용 |
 | 3 | 예외가 반환된 항목은 **빈 dataclass**로 치환 (`fetched=False`) | `bot.py` | — |
-| 4 | `tweets` 비어있지 않으면 `await summarize_tweets(tweets)` 호출 | `tweet_summarizer` | 실패 시 summary=None |
+| 4 | `tweets` 비어있지 않으면 `await summarize_tweets(tweets)` 호출 (gemq, 재시도 2회) | `tweet_summarizer` | 실패 시 **영어 원문 덤프 금지** → 한국어 안내+원문 링크 폴백 |
 | 5 | `build_daily_report(tweets, scan_data, price_data, tweet_summary)` → HTML | `formatter.py` | 필수 |
 | 6 | `TELEGRAM_BOT_TOKEN` 없으면 **preview mode**: HTML 태그 제거 후 stdout 출력, exit | `bot.py` | — |
 | 7a | `chart_b64 = await generate_chart_base64()` | `chart_generator.py` | 실패 시 텍스트 폴백 |
