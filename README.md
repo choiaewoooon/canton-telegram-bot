@@ -2,7 +2,9 @@
 
 매일 아침 9시(KST)에 Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인.
 
-홈 Mac의 `launchd` LaunchAgent에서 구동한다. 클라우드 호스팅 X.
+홈 Mac의 `launchd` LaunchAgent에서 구동한다. 별도 클라우드 호스팅 없이 돈다.
+
+운영하며 겪은 함정(텔레그램 포맷 400, LLM 폴백 사고 등)과 처방은 [claude-code-harness의 운영 노트](https://github.com/choiaewoooon/claude-code-harness/blob/main/patterns/llm-daily-bot-ops.md)에 정리했다.
 
 ## Tech Stack
 
@@ -13,7 +15,7 @@
 | HTTP | httpx 0.25+ | 외부 API 비동기 호출 |
 | HTML 파싱 | beautifulsoup4 4.12+ | CantonScan HTML |
 | 동적 스크래핑 | Playwright 1.40+ | CantonScan SPA 폴백 |
-| 스케줄 | APScheduler 3.10+ (선택) · launchd (실제) | 9시 KST 발사 |
+| 스케줄 | APScheduler 3.10+ (선택) · launchd (실제) | 9시 KST 실행 |
 | 이미지 | Jinja2 3.1 + matplotlib 3.8+ | 일일 카드 PNG 생성 |
 | 설정 | python-dotenv 1.0+ | `.env` 로드 |
 
@@ -48,7 +50,7 @@ cp .env.example .env
 ### Development / Manual Test
 
 ```bash
-# 미리보기 모드 (텔레그램 전송 없음, stdout 에 HTML-stripped 텍스트 출력)
+# 미리보기 모드 (텔레그램 전송 없음, stdout에 HTML 태그를 제거한 텍스트 출력)
 TELEGRAM_BOT_TOKEN= python bot.py --now
 
 # 실제 전송 1회 (테스트 채널 권장)
@@ -71,7 +73,7 @@ launchctl unload ~/Library/LaunchAgents/com.cobling.canton-bot.plist 2>/dev/null
 # 3. 로드
 launchctl load ~/Library/LaunchAgents/com.cobling.canton-bot.plist
 
-# 4. 수동 테스트 발사
+# 4. 수동 테스트 실행
 launchctl kickstart gui/$(id -u)/com.cobling.canton-bot
 
 # 5. 로그 확인
