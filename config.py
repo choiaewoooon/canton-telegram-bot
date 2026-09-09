@@ -3,9 +3,22 @@ Canton Telegram Bot - 설정 파일
 .env 파일에서 환경변수를 로드합니다.
 """
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ============================================================
+# Playwright 브라우저 격리 (2026-09-09)
+# ============================================================
+# 공용 캐시(~/Library/Caches/ms-playwright)를 여러 프로젝트가 나눠 쓰면, 더 최신 Playwright가
+# `playwright install`을 돌릴 때 자기가 참조하지 않는 구버전 빌드를 청소해버린다.
+# 실제 사고: gstack(playwright 1.62.1)이 chromium 1234를 깔면서 여기서 쓰는 1208을 지웠고,
+# 2026-09-08~09 이틀간 이미지 카드 렌더가 실패했다(봇은 텍스트 폴백으로 계속 발송됨).
+# → Ozzycanton 전용 경로로 격리해 외부 도구의 청소 대상에서 제외한다.
+# LaunchAgent plist에도 같은 값을 넣어두지만, 수동 실행 등 다른 진입점에서도 보장되도록 여기서 설정한다.
+_OZZY_BROWSERS = Path(__file__).resolve().parent.parent / ".playwright-browsers"
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(_OZZY_BROWSERS))
 
 # ============================================================
 # Telegram 설정

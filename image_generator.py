@@ -7,6 +7,9 @@ import logging
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
+# config를 먼저 로드해 PLAYWRIGHT_BROWSERS_PATH(전용 브라우저 경로)를 보장한다.
+# bot.py를 거치지 않고 이 모듈만 단독으로 import하는 경우에도 격리가 깨지지 않도록 하기 위함.
+import config  # noqa: F401
 from playwright.async_api import async_playwright
 
 from collectors import CantonScanData, PriceData

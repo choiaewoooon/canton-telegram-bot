@@ -16,3 +16,6 @@ docs/superpowers/
 *.bak
 .superpowers/
 .last_sent
+
+# 운영 로그 (ensure-playwright 등)
+logs/
