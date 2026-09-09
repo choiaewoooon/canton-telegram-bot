@@ -1,11 +1,18 @@
 """
 Twitter/X 데이터 수집 모듈
-RapidAPI Twttr API (twitter241.p.rapidapi.com)를 사용하여 Canton 관련 계정의
+ScrapeCreators API (api.scrapecreators.com)를 사용하여 Canton 관련 계정의
 최근 트윗을 수집합니다.
 
 흐름:
-1. /user?username=<name> → rest_id 조회 (한 번 성공하면 프로세스 수명 동안 메모리 캐시)
-2. /user-replies?user=<rest_id>&count=40 → 본인 트윗 + 리플라이 포함 타임라인
+1. GET /v1/twitter/user-tweets?handle=<name> → 해당 계정의 최근 트윗(평면 리스트)
+   - rest_id 조회 단계 불필요(핸들을 직접 받음)
+   - 응답 트윗 노드는 여전히 tweet_results.result와 동일한 legacy/core 구조
+
+교체 이력(2026-07-17): 기존 RapidAPI twitter241("Twttr API")가 게이트웨이
+레벨로 전면 405("provider has disabled request access")를 반환 —
+twitter241 개별 문제가 아니라 RapidAPI(Nokia 인수 후 방치) 전역 장애.
+키·구독과 무관하게 모든 요청 차단됨. ScrapeCreators는 응답 스키마가
+twitter241과 동일(legacy/core/views)해 파서를 거의 그대로 재사용.
 """
 import asyncio
 import logging
@@ -19,9 +26,8 @@ import config
 
 logger = logging.getLogger(__name__)
 
-RAPIDAPI_HOST = "twitter241.p.rapidapi.com"
-USER_URL = f"https://{RAPIDAPI_HOST}/user"
-USER_REPLIES_URL = f"https://{RAPIDAPI_HOST}/user-replies"
+SCRAPECREATORS_BASE = "https://api.scrapecreators.com"
+USER_TWEETS_URL = f"{SCRAPECREATORS_BASE}/v1/twitter/user-tweets"
 
 
 @dataclass
@@ -38,78 +44,27 @@ class TweetData:
     media_urls: list = field(default_factory=list)
 
 
-# Process-lifetime cache: screen_name → Twitter numeric user_id (rest_id).
-# Avoids an extra /user lookup every 15-minute collection cycle.
-_user_id_cache: dict[str, str] = {}
-
-
 class TwitterCollector:
-    """RapidAPI Twttr API 기반 트위터 수집기"""
+    """ScrapeCreators API 기반 트위터 수집기"""
 
     def __init__(self):
         self.client = httpx.AsyncClient(
-            timeout=15,
+            timeout=20,
             headers={
-                "x-rapidapi-host": RAPIDAPI_HOST,
-                "x-rapidapi-key": config.RAPIDAPI_KEY,
+                "x-api-key": config.SCRAPECREATORS_API_KEY,
             },
         )
 
-    async def _resolve_user_id(self, username: str) -> str | None:
-        """username → rest_id. 첫 호출만 네트워크, 이후는 메모리 캐시."""
-        cached = _user_id_cache.get(username)
-        if cached:
-            return cached
-        try:
-            resp = await self.client.get(USER_URL, params={"username": username})
-            resp.raise_for_status()
-            data = resp.json()
-            rest_id = (
-                data.get("result", {})
-                .get("data", {})
-                .get("user", {})
-                .get("result", {})
-                .get("rest_id")
-            )
-            if rest_id:
-                _user_id_cache[username] = rest_id
-                return rest_id
-        except Exception as e:
-            logger.error(f"@{username} rest_id 조회 실패: {e}")
-        return None
+    def _iter_tweet_nodes(self, payload: dict):
+        """ScrapeCreators 응답에서 개별 트윗 노드를 순회.
 
-    def _iter_tweet_entries(self, payload: dict):
-        """타임라인 응답에서 개별 tweet_results.result 노드를 순회.
-
-        응답 구조: result.timeline.instructions[] 중
-        - TimelineAddEntries.entries[] (리스트)
-        - 또는 entry 단일 (pinned)
-        각 entry의 content가 TimelineTimelineItem(단일 트윗) 혹은
-        TimelineTimelineModule(대화 스레드 — items[] 포함)일 수 있음.
+        응답: {"success": bool, "credits_remaining": int, "tweets": [<node>, ...]}
+        각 node는 twitter241의 tweet_results.result와 동일한 구조
+        (rest_id / legacy / core / views 보유).
         """
-        timeline = payload.get("result", {}).get("timeline", {})
-        for ins in timeline.get("instructions", []):
-            # Pinned 등 단일 entry
-            single = ins.get("entry")
-            if single:
-                yield from self._extract_from_entry(single)
-            for entry in ins.get("entries", []):
-                yield from self._extract_from_entry(entry)
-
-    def _extract_from_entry(self, entry: dict):
-        content = entry.get("content", {})
-        typ = content.get("__typename") or content.get("entryType")
-        if typ in ("TimelineTimelineItem",):
-            item = content.get("itemContent", {})
-            tw = item.get("tweet_results", {}).get("result")
-            if tw:
-                yield tw
-        elif typ in ("TimelineTimelineModule",):
-            for sub in content.get("items", []):
-                inner = sub.get("item", {}).get("itemContent", {})
-                tw = inner.get("tweet_results", {}).get("result")
-                if tw:
-                    yield tw
+        for node in payload.get("tweets", []) or []:
+            if isinstance(node, dict):
+                yield node
 
     def _parse_tweet(self, tw: dict, owner_username: str) -> TweetData | None:
         legacy = tw.get("legacy", {})
@@ -126,12 +81,18 @@ class TwitterCollector:
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
 
-        # Screen name from tweet author (usually same as owner, but Modules may
-        # contain replies from other users — drop those).
-        author = (
-            tw.get("core", {}).get("user_results", {}).get("result", {}).get("core", {})
+        # Screen name from tweet author. ScrapeCreators nests it under
+        # core.user_results.result.legacy.screen_name (twitter241 used
+        # ...result.core.screen_name). Try both, fall back to owner.
+        user_result = (
+            tw.get("core", {}).get("user_results", {}).get("result", {})
         )
-        screen_name = author.get("screen_name") or owner_username
+        screen_name = (
+            user_result.get("legacy", {}).get("screen_name")
+            or user_result.get("core", {}).get("screen_name")
+            or owner_username
+        )
+        # Modules/replies may carry other users' tweets — drop those.
         if screen_name.lower() != owner_username.lower():
             return None
 
@@ -163,27 +124,29 @@ class TwitterCollector:
         """특정 계정의 최근 트윗 수집 (지난 N시간)."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=config.TWEET_HOURS_LOOKBACK)
 
-        rest_id = await self._resolve_user_id(username)
-        if not rest_id:
-            return []
-
         try:
             resp = await self.client.get(
-                USER_REPLIES_URL, params={"user": rest_id, "count": 40}
+                USER_TWEETS_URL, params={"handle": username}
             )
             resp.raise_for_status()
             payload = resp.json()
 
             tweets: list[TweetData] = []
-            for tw_node in self._iter_tweet_entries(payload):
+            for tw_node in self._iter_tweet_nodes(payload):
                 parsed = self._parse_tweet(tw_node, owner_username=username)
                 if parsed is None:
                     continue
+                # 고정(pinned) 트윗이 리스트 선두로 오는 경우가 있어 오래된 고정글이
+                # 섞일 수 있음 — cutoff로 자연스럽게 걸러짐.
                 if parsed.created_at < cutoff:
                     continue
                 tweets.append(parsed)
 
-            logger.info(f"@{username}: {len(tweets)}개 트윗 수집 완료 (rest_id={rest_id})")
+            credits = payload.get("credits_remaining")
+            logger.info(
+                f"@{username}: {len(tweets)}개 트윗 수집 완료"
+                + (f" (credits={credits})" if credits is not None else "")
+            )
             return tweets
 
         except Exception as e:
@@ -192,8 +155,8 @@ class TwitterCollector:
 
     async def collect_all(self) -> dict[str, list[TweetData]]:
         """모든 대상 계정의 트윗 수집"""
-        if not config.RAPIDAPI_KEY:
-            logger.warning("RAPIDAPI_KEY가 설정되지 않았습니다.")
+        if not config.SCRAPECREATORS_API_KEY:
+            logger.warning("SCRAPECREATORS_API_KEY가 설정되지 않았습니다.")
             return {}
 
         results: dict[str, list[TweetData]] = {}

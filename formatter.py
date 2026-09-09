@@ -106,6 +106,12 @@ def build_daily_report(
                 fallback_lines.append(f'· @{tw.username} ({when}) <a href="{tw.url}">원문</a>')
         lines.append(f"<blockquote>{chr(10).join(fallback_lines)}</blockquote>")
         lines.append("")
+    else:
+        # 트윗 0개: 수집기가 조용히 실패했을 수 있음(2026-07-17 twitter241 사망 사고).
+        # 아무 표시 없이 반쪽 리포트를 내보내지 않도록 명시적으로 상태를 남긴다.
+        lines.append(f"<b>\U0001f5de️ 트위터 소식 정리</b>")
+        lines.append("<blockquote>· 오늘은 새 트윗이 없거나 수집에 실패했습니다.</blockquote>")
+        lines.append("")
 
 
     return "\n".join(lines)

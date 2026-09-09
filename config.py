@@ -14,9 +14,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID", "")  # 예: "@my_canton_channel" 또는 "-100xxxx"
 
 # ============================================================
-# Twitter/X 설정 (RapidAPI - Twitter API45)
+# Twitter/X 설정 (ScrapeCreators API)
 # ============================================================
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+# 2026-07-17 RapidAPI twitter241 게이트웨이 전역 장애로 ScrapeCreators로 교체.
+# RAPIDAPI_KEY는 복구/폴백 대비 남겨둠(현재 미사용).
+SCRAPECREATORS_API_KEY = os.getenv("SCRAPECREATORS_API_KEY", "")
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")  # deprecated (twitter241 사망)
 
 # 모니터링 대상 트위터 계정
 TWITTER_ACCOUNTS = ["CantonNetwork", "CantonFdn"]

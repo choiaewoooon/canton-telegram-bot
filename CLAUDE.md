@@ -1,6 +1,6 @@
 # Canton Telegram Bot
 
-매일 아침 10시(KST) Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인. CoinGecko / CantonScan / RapidAPI Twitter API45에서 데이터를 병렬 수집하고, HTML 텔레그램 메시지 + 이미지 카드를 생성해서 `python-telegram-bot` SDK로 전송한다.
+매일 아침 10시(KST) Canton Network ($CC) 일일 리포트를 텔레그램 채널에 자동 포스팅하는 Python 파이프라인. CoinGecko / CantonScan / ScrapeCreators(트위터)에서 데이터를 병렬 수집하고, HTML 텔레그램 메시지 + 이미지 카드를 생성해서 `python-telegram-bot` SDK로 전송한다. (2026-07-17까지는 RapidAPI twitter241을 썼으나 게이트웨이 전역 장애로 교체 — Change Log 참조)
 
 **홈 Mac의 `launchd`에서 구동**. 클라우드 배포 대상이 아님.
 
@@ -37,7 +37,7 @@ canton-telegram-bot/
 │   ├── __init__.py
 │   ├── price_collector.py      # CoinGecko $CC 가격
 │   ├── cantonscan_collector.py # Canton 네트워크 지표
-│   └── twitter_collector.py    # RapidAPI Twitter API45
+│   └── twitter_collector.py    # ScrapeCreators (구 RapidAPI twitter241)
 ├── templates/                  # Jinja2 HTML 템플릿 (daily_card.html + assets)
 │   ├── daily_card.html
 │   └── assets/
@@ -185,3 +185,4 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `perf`
 | 2026-07-02 | launchd 실행 모델: 상주 APScheduler 데몬 → `bot.py --now` 1회성 + `StartCalendarInterval` | 07-01 코드 수정이 상주 데몬에 반영 안 돼(재시작 누락) 요약이 다시 영어로 나감. 1회성 실행은 매번 새 프로세스라 항상 최신 코드 → stale-code 함정 제거. KeepAlive/RunAtLoad 제거, plist 백업=`*.bak.20260702` |
 | 2026-07-04 | 텔레그램 HTML 태그 정제 + 평문 폴백 추가 | Gemini가 요약에 `<br>` 넣어 텔레그램 400(unsupported tag)으로 이미지·텍스트 둘 다 미전송 → 07-04 포스팅 누락. `tweet_summarizer._clean_html`이 비허용 태그 제거(`<br>`→줄바꿈), `bot.py`는 HTML 전송 실패 시 `_strip_html`로 평문 재전송(반드시 발송) |
 | 2026-07-08 | 이미지 생성·전송 재시도(backoff) 추가 + 전송 로직 `_send_daily_post`로 분리 | 07-08 10:00 이미지 카드는 정상 생성(258KB)됐으나 `sendPhoto`가 순간 네트워크 블립(`httpx.ConnectError`→`NetworkError`)으로 1회 실패, **즉시** 텍스트 폴백해 그날 이미지 누락(1초 뒤 같은 호스트로 텍스트 전송은 성공 = 일회성 블립, 역대 82회 중 유일). 이제 이미지 생성/전송을 각 최대 3회 backoff 재시도(3s·6s)해 이미지+내용+요약을 항상 한 덩어리로 발송하고, 재시도까지 모두 실패한 극단적 경우에만 텍스트 폴백. `BadRequest`(내용 오류)는 재시도 안 함(구 07-04 경로 유지). 회귀 테스트 `test_send_retry.py`(mock, 12케이스, pytest 불필요) |
+| 2026-07-17 | 트위터 소스 RapidAPI twitter241 → **ScrapeCreators**(`/v1/twitter/user-tweets`) 교체 + 트윗 0개 시 캡션 상태 표시 추가 | 07-17 10:00 twitter241이 전 엔드포인트 405("provider has disabled request access") 반환 → 트윗 0개로 반쪽 리포트(133자) 발송. **twitter241 개별 문제가 아니라 RapidAPI 게이트웨이 전역 장애**(무관한 weatherapi/jsearch/exercisedb도 동일 405, 키 없이·가짜 키도 동일 = 인증 이전 차단; Nokia 인수 후 방치 정황). 대안 조사 결과 last30days가 이미 쓰는 ScrapeCreators가 응답 스키마 동일(`legacy`/`core`/`views`)이라 `_parse_tweet` 거의 그대로 재사용, 크레딧 9천+(≈수년치) 선불됨. `SCRAPECREATORS_API_KEY`는 `~/.config/last30days/.env`와 동일 키 공유(같은 크레딧 풀). rest_id 조회 단계 제거(핸들 직접), 트윗 평면 리스트라 타임라인 순회 로직 삭제. `screen_name`은 `core.user_results.result.legacy.screen_name`(twitter241은 `.core.screen_name`)이라 양쪽 폴백. 고정 트윗이 선두로 오지만 24h cutoff가 자연 필터. **RAPIDAPI_KEY는 미사용이나 복구 대비 잔존**. `formatter.py`: 트윗 0개일 때 "수집에 실패" 한 줄 명시(조용한 반쪽 발송 방지). 미리보기 검증: @CantonNetwork 8 / @CantonFdn 3개 수집, 요약 918자, 회귀테스트 12/12 |
