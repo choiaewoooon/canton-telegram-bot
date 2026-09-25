@@ -1,6 +1,13 @@
 """
 트윗 요약 모듈
-Gemini(gemq, Antigravity CLI)로 수집된 트윗을 한국어로 번역·요약합니다.
+다중 경로 LLM 래퍼 llmq로 수집된 트윗을 한국어로 번역·요약합니다.
+체인 'daily' = ChatGPT(Codex, gpt-5.6-luna) → Claude(Antigravity) → Gemini 순으로 자동 전환.
+
+- 2026-09-23: Gemini 구독 해지로 gemq 전 모델 429 → gptq(gpt-reserve) 단일 경로로 교체.
+- 2026-09-24: gpt-reserve 모델 전용 한도가 하루 만에 소진돼 또 폴백 발송.
+  → 단일 경로 의존을 끊고 llmq(경로 자동 전환 + 한도 걸린 경로 쿨다운)로 교체.
+  모든 경로 실패 시 Mac 알림을 띄워 조용한 실패를 막는다.
+아래 'Gemini' 서술은 그 이전 연혁이다.
 
 왜 Gemini인가 (2026-07-01 교체):
 - 과거엔 `claude -p`(구독 OAuth, macOS Keychain)를 썼으나, OAuth 로그인이 만료되면
@@ -26,9 +33,9 @@ _TG_ALLOWED_TAGS = {
 
 logger = logging.getLogger(__name__)
 
-GEMQ_PATH = "/Users/choejaewon/.local/bin/gemq"
-GEMQ_MODEL = "pro"      # 톤 품질 우선 (무료 Gemini 3.1 Pro). 저렴하게는 "flash".
-CALL_TIMEOUT = 280      # 초. gemq 내부 print-timeout(4m)보다 약간 짧게
+GEMQ_PATH = "/Users/choejaewon/.local/bin/llmq"   # 변수명은 호환 유지, 실제로는 다중 경로 래퍼
+GEMQ_MODEL = "daily"    # codex(gpt-5.6-luna) → claude → gemini. gpt-6-astra는 비싸서 쓰지 않음
+CALL_TIMEOUT = 420      # 초. llmq 경로별 타임아웃 합(90+120+180)보다 약간 길게
 MAX_ATTEMPTS = 2        # 일시적 실패 대비 재시도 횟수
 
 INSTRUCTION = """아래(===== 처리할 내용 =====)는 Canton Network 트위터 계정들의 최근 24시간 트윗이다.
@@ -53,7 +60,7 @@ INSTRUCTION = """아래(===== 처리할 내용 =====)는 Canton Network 트위�
 
 
 async def summarize_tweets(tweets: dict[str, list[TweetData]]) -> str:
-    """수집된 트윗들을 Gemini로 한국어 요약 + 원문 링크 포함하여 반환 (HTML)"""
+    """수집된 트윗들을 LLM(llmq)으로 한국어 요약 + 원문 링크 포함하여 반환 (HTML)"""
 
     total = sum(len(tw_list) for tw_list in tweets.values())
     if total == 0:
@@ -89,6 +96,7 @@ async def summarize_tweets(tweets: dict[str, list[TweetData]]) -> str:
 
     # 모든 재시도 실패 → 영어 원문 덤프 대신 정직한 한국어 폴백(링크만)
     logger.error("트윗 요약 실패 — 한국어 폴백(원문 링크)으로 대체")
+    _notify_failure()
     return _fallback_format(all_tweets)
 
 
@@ -131,10 +139,24 @@ async def _run_gemq(data_text: str) -> str:
         # (claude 시절엔 stderr만 로그해서, 에러가 stdout으로 나가는 인증 실패의 원인을 놓쳤다.)
         logger.warning(
             f"gemq 실패 (시도 {attempt}/{MAX_ATTEMPTS}) "
-            f"rc={process.returncode} stdout={out[:300]!r} stderr={err[:300]!r}"
+            f"rc={process.returncode} stdout={out[-300:]!r} stderr(끝)={err[-500:]!r}"
         )
 
     return ""
+
+
+def _notify_failure() -> None:
+    """모든 LLM 경로 실패 시 Mac 알림. 알림 실패는 무시(발송 파이프라인에 영향 없음)."""
+    try:
+        import subprocess
+        subprocess.run(
+            ["/usr/bin/osascript", "-e",
+             'display notification "모든 LLM 경로 실패 — 폴백으로 발송됨. llmq --status 확인" '
+             'with title "캔톤 데일리 요약 실패" sound name "Basso"'],
+            timeout=10, capture_output=True,
+        )
+    except Exception:
+        pass
 
 
 def _clean_html(text: str) -> str:
